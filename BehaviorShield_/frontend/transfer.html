@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SecureBank — Fund Transfer</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#0b0f1a;font-family:'Segoe UI',sans-serif;color:#f1f5f9;
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;
+  padding:18px 16px;gap:12px}
+
+.nav{width:100%;max-width:520px;display:flex;align-items:center;
+  justify-content:space-between;padding:10px 15px;background:#111827;
+  border:1px solid rgba(148,163,184,.12);border-radius:12px}
+.nav-logo{font-size:16px;font-weight:700;color:#38bdf8}
+.nav-logo span{color:#f1f5f9}
+.nav-user{font-size:11px;color:#64748b}
+.shield-badge{display:flex;align-items:center;gap:6px;font-size:11px;
+  padding:4px 10px;border:1px solid #22c55e;border-radius:99px;
+  color:#22c55e;transition:all .4s}
+.shield-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;
+  animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Session score bar */
+.sbar{width:100%;max-width:520px;padding:10px 14px;background:#111827;
+  border:1px solid rgba(148,163,184,.12);border-radius:10px;
+  display:flex;align-items:center;justify-content:space-between;
+  flex-wrap:wrap;gap:6px;font-size:11px;font-family:'Courier New',monospace}
+.sbar-left{color:#64748b}
+.scores{display:flex;gap:14px}
+.sc{color:#94a3b8}.sc span{font-weight:700}
+.dev-row{width:100%;font-size:10px;padding-top:6px;
+  border-top:1px solid rgba(148,163,184,.08);display:none;
+  align-items:center;gap:6px}
+.dev-row.show{display:flex}
+.dev-row.trusted  {color:#22c55e}
+.dev-row.probation{color:#eab308}
+.dev-row.unknown  {color:#f97316}
+
+/* Device tx limit */
+.dev-limit{display:none;width:100%;max-width:520px;padding:9px 13px;
+  background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.3);
+  border-radius:9px;font-size:11px;color:#eab308;
+  font-family:'Courier New',monospace;gap:7px;align-items:center}
+.dev-limit.show{display:flex}
+
+/* Balance card */
+.bal{width:100%;max-width:520px;
+  background:linear-gradient(135deg,#0ea5e9,#0369a1);
+  border-radius:14px;padding:18px 20px}
+.bal-lbl{font-size:11px;opacity:.8;margin-bottom:4px}
+.bal-amt{font-size:28px;font-weight:700}
+.bal-acc{font-size:11px;opacity:.7;margin-top:3px}
+
+/* Transfer form */
+.form-card{width:100%;max-width:520px;background:#111827;
+  border:1px solid rgba(148,163,184,.12);border-radius:14px;padding:22px}
+.form-title{font-size:14px;font-weight:600;margin-bottom:18px;
+  display:flex;align-items:center;gap:8px}
+.form-title i{color:#38bdf8}
+label{display:block;font-size:11px;color:#64748b;margin-bottom:5px;margin-top:14px;letter-spacing:.04em}
+label:first-of-type{margin-top:0}
+input,select{width:100%;padding:10px 13px;background:#0f172a;
+  border:1px solid rgba(148,163,184,.15);border-radius:8px;
+  color:#f1f5f9;font-size:14px;outline:none;transition:border-color .2s}
+input:focus,select:focus{border-color:#38bdf8}
+select option{background:#0f172a}
+.amt-wrap{position:relative}
+.amt-pre{position:absolute;left:13px;top:50%;transform:translateY(-50%);
+  font-size:15px;color:#94a3b8;font-weight:600}
+.amt-wrap input{padding-left:26px}
+.new-bene{display:none;margin-top:9px}
+.new-bene.show{display:block;animation:fadein .3s}
+.new-bene input{border-color:rgba(249,115,22,.4)}
+.new-bene-hint{font-size:10px;color:#f97316;margin-top:3px;
+  display:flex;align-items:center;gap:4px}
+
+/* Demo-only "simulate transaction hour" override — deliberately
+   de-emphasized (small text, muted color, collapsed by default) so it
+   reads as a testing aid, not part of the real transfer form. */
+.demo-hour-toggle{margin-top:8px;font-size:10px;color:#475569;
+  cursor:pointer;display:flex;align-items:center;gap:4px;
+  user-select:none;width:fit-content}
+.demo-hour-toggle:hover{color:#64748b}
+.demo-hour-toggle i{font-size:11px;transition:transform .15s}
+.demo-hour-toggle.open i{transform:rotate(90deg)}
+.demo-hour-panel{display:none;margin-top:6px;padding:8px 10px;
+  background:rgba(15,23,42,.6);border:1px dashed rgba(148,163,184,.2);
+  border-radius:6px}
+.demo-hour-panel.show{display:block;animation:fadein .2s}
+.demo-hour-panel label{font-size:9px;color:#64748b;margin:0 0 4px;
+  letter-spacing:.04em;text-transform:uppercase}
+.demo-hour-row{display:flex;align-items:center;gap:8px}
+.demo-hour-row select{font-size:12px;padding:5px 8px;width:auto;flex:0 0 auto}
+.demo-hour-note{font-size:9px;color:#475569;line-height:1.4}
+.xfer-btn{width:100%;margin-top:20px;padding:12px;background:#0ea5e9;
+  border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:600;
+  cursor:pointer;transition:all .2s;display:flex;align-items:center;
+  justify-content:center;gap:8px}
+.xfer-btn:hover:not(:disabled){background:#0284c7}
+.xfer-btn:disabled{opacity:.7;cursor:not-allowed}
+
+/* Fallback banner */
+.fallback{display:none;width:100%;max-width:520px;padding:10px 13px;
+  border-radius:10px;border:1px solid rgba(249,115,22,.4);
+  background:rgba(249,115,22,.08);font-size:11px;color:#f97316;
+  gap:8px;align-items:flex-start;font-family:'Courier New',monospace}
+.fallback.show{display:flex}
+.fallback.crit{border-color:rgba(239,68,68,.5);background:rgba(239,68,68,.08);color:#ef4444}
+
+/* Response box */
+.resp{display:none;width:100%;max-width:520px;padding:15px 17px;
+  border-radius:12px;border:1px solid;font-size:12px;line-height:1.7}
+.resp.show{display:block;animation:fadein .3s}
+.resp.clear{background:rgba(34,197,94,.08); border-color:rgba(34,197,94,.4); color:#22c55e}
+.resp.warn {background:rgba(234,179,8,.08); border-color:rgba(234,179,8,.4); color:#eab308}
+.resp.hold {background:rgba(249,115,22,.08);border-color:rgba(249,115,22,.4);color:#f97316}
+.resp.crit {background:rgba(239,68,68,.08); border-color:rgba(239,68,68,.5); color:#ef4444}
+.resp-title{font-size:13px;font-weight:700;margin-bottom:5px}
+.signals{margin-top:11px;padding-top:11px;border-top:1px solid rgba(148,163,184,.1);display:none}
+.sig-lbl{font-size:9px;color:#475569;letter-spacing:.06em;margin-bottom:5px}
+.sig-row{display:flex;justify-content:space-between;font-size:10px;
+  padding:4px 0;border-bottom:1px solid rgba(148,163,184,.06)}
+.sig-pts{font-weight:700}
+.sig-resp{font-size:9px;color:#475569;padding:2px 0 5px}
+
+/* Recent */
+.recent{width:100%;max-width:520px;background:#111827;
+  border:1px solid rgba(148,163,184,.12);border-radius:14px;padding:17px 19px}
+.rec-title{font-size:11px;color:#64748b;letter-spacing:.05em;margin-bottom:11px}
+.tx-row{display:flex;align-items:center;justify-content:space-between;
+  padding:7px 0;border-bottom:1px solid rgba(148,163,184,.07);font-size:12px}
+.tx-row:last-child{border-bottom:none}
+.tx-name{color:#f1f5f9}.tx-bene{font-size:10px;color:#475569;margin-top:2px}
+.tx-amt{font-weight:600;color:#22c55e}.tx-date{font-size:10px;color:#475569}
+
+/* Bottom nav */
+.bnav{width:100%;max-width:520px;display:flex;gap:8px}
+.bnav-btn{flex:1;padding:9px;background:#111827;
+  border:1px solid rgba(148,163,184,.12);border-radius:10px;
+  color:#64748b;font-size:11px;cursor:pointer;text-align:center;
+  transition:all .15s;font-family:'Segoe UI',sans-serif}
+.bnav-btn:hover{background:#1e293b;color:#f1f5f9}
+.bnav-btn.on{border-color:#38bdf8;color:#38bdf8}
+.bnav-btn i{display:block;font-size:17px;margin-bottom:2px}
+
+@keyframes fadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div>
+    <div class="nav-logo">Secure<span>Bank</span></div>
+    <div class="nav-user">Arjun Sharma · SBI-XXXX-4821</div>
+  </div>
+  <div class="shield-badge" id="shieldBadge">
+    <div class="shield-dot" id="shieldDot"></div>
+    <span id="shieldLbl">PROTECTED</span>
+  </div>
+</div>
+
+<!-- Session score bar -->
+<div class="sbar">
+  <div class="sbar-left"><i class="ti ti-shield"></i> BehaviorShield session</div>
+  <div class="scores">
+    <span class="sc">B: <span id="dispB">0</span></span>
+    <span class="sc">T: <span id="dispT">0</span></span>
+    <span class="sc">Combined: <span id="dispC">0</span></span>
+  </div>
+  <div class="dev-row" id="devRow">
+    <i class="ti ti-device-desktop" id="devRowIcon"></i>
+    <span id="devRowText">Device checking...</span>
+  </div>
+</div>
+
+<!-- Device limit banner -->
+<div class="dev-limit" id="devLimit">
+  <i class="ti ti-info-circle" style="flex-shrink:0"></i>
+  <span id="devLimitMsg">New device — transaction limit active</span>
+</div>
+
+<!-- Balance -->
+<div class="bal">
+  <div class="bal-lbl">Available Balance</div>
+  <div class="bal-amt">₹1,24,350.00</div>
+  <div class="bal-acc">Savings Account · SBI-XXXX-4821 · IFSC: SBIN0001234</div>
+</div>
+
+<!-- Transfer form -->
+<div class="form-card">
+  <div class="form-title"><i class="ti ti-send"></i> Fund Transfer</div>
+
+  <label>Beneficiary Account</label>
+  <select id="bene" onchange="onBeneChange()">
+    <option value="">— Select beneficiary —</option>
+    <option value="SBI-XXXX1234">Rahul Sharma · SBI-XXXX1234 (saved)</option>
+    <option value="HDFC-XXXX5678">Mom · HDFC-XXXX5678 (saved)</option>
+    <option value="ICICI-XXXX9012">Office Rent · ICICI-XXXX9012 (saved)</option>
+    <option value="NEW">+ Add new beneficiary</option>
+  </select>
+
+  <div class="new-bene" id="newBeneWrap">
+    <label for="newBeneAcc">New Beneficiary Account Number</label>
+    <input type="text" id="newBeneAcc" placeholder="e.g. HDFC-XXXX-0000" autocomplete="off"/>
+    <div class="new-bene-hint">
+      <i class="ti ti-alert-triangle"></i>
+      New beneficiary — BehaviorShield risk monitoring active
+    </div>
+  </div>
+
+  <label>Transfer Amount</label>
+  <div class="amt-wrap">
+    <span class="amt-pre">₹</span>
+    <input type="number" id="amount" placeholder="0.00" min="1" max="500000"/>
+  </div>
+
+  <!-- Demo hour override — always visible for easy demonstration -->
+  <div style="margin-top:10px;padding:10px 12px;background:rgba(15,23,42,.7);
+              border:1px dashed rgba(99,102,241,.35);border-radius:7px">
+    <div style="font-size:9px;color:#6366f1;font-weight:700;letter-spacing:.08em;
+                text-transform:uppercase;margin-bottom:6px">
+      Demo — Simulate Transaction Hour
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <select id="demoHour" style="font-size:12px;padding:5px 8px;width:auto;
+              background:#0f172a;border:1px solid #334155;border-radius:5px;
+              color:#f1f5f9;outline:none"></select>
+      <span style="font-size:10px;color:#475569;line-height:1.4">
+        Set to <strong style="color:#f97316">02:00 or 03:00</strong> to trigger the unusual-hour signal (+15 pts)
+      </span>
+    </div>
+  </div>
+
+  <label>Remarks (optional)</label>
+  <input type="text" id="remarks" placeholder="e.g. Rent payment"/>
+
+  <button class="xfer-btn" id="xferBtn" onclick="doTransfer()">
+    <i class="ti ti-send"></i> Transfer Now
+  </button>
+</div>
+
+<!-- Fallback banner (Section 3.4) -->
+<div class="fallback" id="fallback">
+  <i class="ti ti-alert-triangle" style="flex-shrink:0;font-size:14px;margin-top:1px"></i>
+  <span id="fallbackMsg"></span>
+</div>
+
+<!-- Response box -->
+<div class="resp" id="resp">
+  <div class="resp-title" id="respTitle"></div>
+  <div id="respDetail"></div>
+  <div class="signals" id="sigBox">
+    <div class="sig-lbl">BEHAVIORSHIELD SIGNALS FIRED</div>
+    <div id="sigList"></div>
+  </div>
+  <div id="txMlBox" style="display:none;margin-top:10px;padding:10px 12px;background:rgba(15,23,42,0.7);border-radius:6px;border:1px solid rgba(99,102,241,0.25)"></div>
+</div>
+
+<!-- Recent transactions -->
+<div class="recent">
+  <div class="rec-title">RECENT TRANSACTIONS</div>
+  <div class="tx-row">
+    <div><div class="tx-name">Rahul Sharma</div><div class="tx-bene">SBI-XXXX1234 · 2 days ago · 11:30 AM</div></div>
+    <div style="text-align:right"><div class="tx-amt">−₹5,000</div><div class="tx-date">Cleared</div></div>
+  </div>
+  <div class="tx-row">
+    <div><div class="tx-name">Mom</div><div class="tx-bene">HDFC-XXXX5678 · 5 days ago · 3:15 PM</div></div>
+    <div style="text-align:right"><div class="tx-amt">−₹10,000</div><div class="tx-date">Cleared</div></div>
+  </div>
+  <div class="tx-row">
+    <div><div class="tx-name">Office Rent</div><div class="tx-bene">ICICI-XXXX9012 · 7 days ago · 10:00 AM</div></div>
+    <div style="text-align:right"><div class="tx-amt">−₹8,500</div><div class="tx-date">Cleared</div></div>
+  </div>
+</div>
+
+<!-- Bottom nav -->
+<div class="bnav">
+  <button class="bnav-btn" onclick="location.href='index.html'"><i class="ti ti-home"></i>Home</button>
+  <button class="bnav-btn on"><i class="ti ti-send"></i>Transfer</button>
+  <button class="bnav-btn"><i class="ti ti-history"></i>History</button>
+  <button class="bnav-btn" onclick="openDash()"><i class="ti ti-shield"></i>Monitor</button>
+</div>
+
+<script>
+// ── SESSION STATE (carried from login) ───────────────────────
+const params  = new URLSearchParams(location.search);
+let   bSession= parseFloat(params.get('score')||'0');
+const profile = params.get('profile')||'arjun';
+let   tSession= 0;
+let   dashWin = null;
+let   devLimit= null;
+
+// Arjun's baseline (mirrors profiles.py)
+const ARJUN={
+  avg:8000, known:['SBI-XXXX1234','HDFC-XXXX5678','ICICI-XXXX9012'],
+  h0:8, h1:22
+};
+
+// Sigmoid helpers (same formula as backend)
+const _BK=0.055,_BMID=85,_TK=0.08,_TMID=50;
+function _sig(x,k,mid){
+  const r=100/(1+Math.exp(-k*(x-mid)));
+  const b=100/(1+Math.exp(-k*(0-mid)));
+  return Math.max(0,Math.min(100,(r-b)/(1-b/100)));
+}
+function _combine(br,tr){
+  const bc=_sig(br,_BK,_BMID),tc=_sig(tr,_TK,_TMID);
+  const bp=Math.min(1,br/30),tp=Math.min(1,tr/25);
+  const bn=Math.max(0,(bc-20)/60),tn=Math.max(0,(tc-20)/60);
+  return Math.min(100,bp*bc*(1-tp*0.3)+tp*tc*(1-bp*0.3)+bp*tp*bn*tn*30);
+}
+
+function tier(s){return s<46?0:s<66?1:s<86?2:3}
+const TC={0:'#22c55e',1:'#eab308',2:'#f97316',3:'#ef4444'};
+const TL={0:'PROTECTED',1:'MONITORING',2:'HIGH RISK',3:'UNDER REVIEW'};
+
+// Maps a local raw tier number -> the same tier_label vocabulary the
+// backend's scorer.py TIERS table uses ("NORMAL"/"ELEVATED"/"HIGH RISK"/
+// "CRITICAL"). Used only by the offline-fallback path so render() can
+// branch on tier_label/frozen consistently regardless of whether the
+// state object came from the live backend or local evalLocal().
+const TIER_LABEL_FROM_LOCAL_TIER = {0:'NORMAL',1:'ELEVATED',2:'HIGH RISK',3:'CRITICAL'};
+
+function openDash(){
+  dashWin=window.open('dashboard.html','bs_dash','width=1060,height=690,left=70,top=50');
+  if(!dashWin) dashWin=window.open('dashboard.html','_blank');
+}
+
+function updateBar(b,t){
+  const c=Math.min(100,b+t);
+  const col=TC[tier(c)];
+  document.getElementById('dispB').textContent=Math.round(b);
+  document.getElementById('dispT').textContent=Math.round(t);
+  document.getElementById('dispC').textContent=Math.round(c);
+  document.getElementById('dispC').style.color=col;
+  updateShield(c);
+}
+
+function updateShield(c){
+  const t=tier(c);
+  const col=TC[t];
+  document.getElementById('shieldBadge').style.color=col;
+  document.getElementById('shieldBadge').style.borderColor=col;
+  document.getElementById('shieldDot').style.background=col;
+  document.getElementById('shieldLbl').textContent=TL[t];
+}
+
+function showDeviceRow(ds){
+  if(!ds) return;
+  const row =document.getElementById('devRow');
+  const icon=document.getElementById('devRowIcon');
+  const text=document.getElementById('devRowText');
+  row.className='dev-row show '+ds.status;
+  icon.className=ds.status==='trusted'?'ti ti-device-desktop-check':'ti ti-device-desktop-question';
+  text.textContent=ds.status==='trusted'
+    ?`Device: ${ds.label} · ${ds.sessions} sessions · Trusted`
+    :`Device: ${ds.message}`;
+  if(ds.tx_limit){
+    devLimit=ds.tx_limit;
+    document.getElementById('devLimit').classList.add('show');
+    document.getElementById('devLimitMsg').textContent=
+      `New device — transfers limited to ₹${ds.tx_limit.toLocaleString('en-IN')} until trust is established`;
+  }
+}
+
+function onBeneChange(){
+  const v=document.getElementById('bene').value;
+  document.getElementById('newBeneWrap').classList.toggle('show',v==='NEW');
+}
+
+// ── DEMO HOUR OVERRIDE ───────────────────────────────────────
+// Populates the 0-23 select with the current real hour pre-selected,
+// so default behavior (no override) is unchanged from before this
+// control existed.
+function initDemoHour(){
+  const sel=document.getElementById('demoHour');
+  const now=new Date().getHours();
+  for(let h=0;h<24;h++){
+    const opt=document.createElement('option');
+    opt.value=h;
+    const ampm=h===0?'12 AM':h<12?h+' AM':h===12?'12 PM':(h-12)+' PM';
+    opt.textContent=`${String(h).padStart(2,'0')}:00 (${ampm})`+(h===now?' — now':'');
+    if(h===now)opt.selected=true;
+    sel.appendChild(opt);
+  }
+}
+
+
+// ── TRANSFER HANDLER ─────────────────────────────────────────
+function doTransfer(){
+  const beneVal=document.getElementById('bene').value;
+  const newBene=document.getElementById('newBeneAcc').value.trim();
+  const bene   =beneVal==='NEW'?(newBene||'NEW-UNKNOWN'):beneVal;
+  const amount =parseFloat(document.getElementById('amount').value)||0;
+  // Demo override: defaults to current hour (id="demoHour" select is
+  // pre-populated with new Date().getHours() selected — see initDemoHour()),
+  // but can be changed via the collapsed "Demo: simulate transaction hour"
+  // panel to demonstrate the unusual_hour signal without waiting for a
+  // real off-hours run.
+  const hour   =parseInt(document.getElementById('demoHour').value)||new Date().getHours();
+
+  if(!bene){alert('Please select a beneficiary');return}
+  if(amount<=0){alert('Please enter a valid amount');return}
+
+  // Device limit check before anything else
+  if(devLimit!==null && amount>devLimit){
+    showResp('hold',
+      'Transfer Requires Device Verification',
+      `This device has not established sufficient trust. Maximum transfer on a new device is ₹${devLimit.toLocaleString('en-IN')}. This limit is lifted after 5 sessions on this device.`,
+      []);
+    return;
+  }
+
+  const btn=document.getElementById('xferBtn');
+  btn.disabled=true;
+  btn.innerHTML='<i class="ti ti-loader"></i> Evaluating risk...';
+
+  // Try backend first, fall back to local scoring
+  fetch('http://localhost:8000/transaction/'+profile,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({amount,beneficiary:bene,hour,profile})
+  })
+  .then(r=>r.ok?r.json():Promise.reject())
+  .then(st=>render(st,btn))
+  .catch(()=>{
+    const sigs=evalLocal(amount,bene,hour);
+    const tRaw=sigs.reduce((s,x)=>s+x.pts,0);
+    const tC  =_sig(tRaw,_TK,_TMID);
+    const comb=_combine(bSession,tRaw);
+    const t   =tier(comb);
+    render({
+      behavioural_score:_sig(bSession,_BK,_BMID),
+      transaction_score:tC, combined_score:comb, tier:t,
+      // tier_label / frozen derived locally so render() can use the
+      // same tier_label/frozen-driven branches as the live backend path
+      // (fix: previously this object had no tier_label/frozen at all,
+      // forcing render() to fall back to raw combined_score thresholds).
+      tier_label:TIER_LABEL_FROM_LOCAL_TIER[t],
+      frozen:t===3,
+      signals:sigs.map(s=>({layer:'transaction',signal:s.lbl,pts:'+'+s.pts,response:s.resp})),
+      fallback:getFallback(comb,tRaw),
+    },btn);
+  });
+}
+
+function evalLocal(amount,bene,hour){
+  const sigs=[];
+  const isNew=!ARJUN.known.includes(bene);
+  const isLarge=amount>ARJUN.avg*3;
+  const isOff=hour<ARJUN.h0||hour>ARJUN.h1;
+  if(isLarge) sigs.push({pts:35,lbl:`₹${amount.toLocaleString('en-IN')} — ${Math.round(amount/ARJUN.avg)}× above baseline`,resp:'Bank verification required — step-up KYC before transaction proceeds'});
+  if(isNew)   sigs.push({pts:25,lbl:'New / unrecognised beneficiary',resp:'Bank needs to verify beneficiary details — 10-min cooling window applied'});
+  if(isOff)   sigs.push({pts:15,lbl:`Transfer at ${hour}:00 — outside usual ${ARJUN.h0}–${ARJUN.h1}h`,resp:'Silent monitoring — bank will verify if combined with other signals'});
+  if(isLarge&&isNew) sigs.push({pts:55,lbl:'COMPOUND: large amount + new beneficiary',resp:'Bank has placed this transaction under mandatory compliance review'});
+  return sigs;
+}
+
+function getFallback(c,tRaw){
+  if(c>=86) return{triggered:true,action:'bank_review',
+    message:'The bank has flagged this session for mandatory compliance review. Transaction cancelled. Funds have not moved.'};
+  if(c>=66&&tRaw>30) return{triggered:true,action:'step_up_otp',
+    message:'Bank needs to verify this transaction. OTP step-up and KYC check initiated. Transaction held for up to 10 minutes.'};
+  if(c>=66) return{triggered:true,action:'silent_reauth',
+    message:'Bank is verifying your session details. Please re-authenticate to continue.'};
+  return{triggered:false,action:'none',message:''};
+}
+
+// REMOVED: `let otpAlreadyTriggered` and `const HIGH_AMOUNT_KYC_THRESHOLD`
+// used to live here as frontend-only state. This was broken: clicking the
+// "New Transfer" button called resetXfer(), which reset
+// otpAlreadyTriggered back to false — silently erasing the only memory of
+// a prior flagged attempt, so a retry to the SAME beneficiary scored as a
+// fresh first attempt (defeating the entire purpose of this feature).
+// Retry/attempt tracking is now done authoritatively on the BACKEND, keyed
+// per-beneficiary in SuspicionScorer.flagged_attempts (independent of
+// combined_score, immune to UI-side resets), and exposed via
+// st.fallback.action === 'bank_review' (now correctly set on retry by the
+// backend) and st.pending_tx.is_retry / st.pending_tx.force_immediate_kyc
+// below, used only for more specific user-facing messaging.
+
+function render(st,btn){
+  const c=Math.round(st.combined_score);
+  tSession=Math.round(st.transaction_score||0);
+  updateBar(bSession,tSession);
+  if(dashWin&&!dashWin.closed) dashWin.postMessage(st,'*');
+
+  const sigs=st.signals||[];
+  const label   = st.tier_label;
+  const fbAction= st.fallback?.action;
+  const txAmt   = parseFloat(document.getElementById('amount').value)||0;
+
+  const isFrozenOrCritical =
+    st.frozen === true ||
+    label === 'CRITICAL' ||
+    fbAction === 'bank_review';
+
+  // New rung: automated verification call, between OTP and freeze.
+  // Backend sets fbAction='automated_call' for the upper portion of the
+  // HIGH RISK band (cs >= 78) when there's no retry history and no
+  // force_immediate_kyc override — see scorer.py _fallback().
+  const isAutomatedCall = !isFrozenOrCritical && fbAction === 'automated_call';
+
+  const isHighRisk = !isFrozenOrCritical && !isAutomatedCall && (
+    label === 'HIGH RISK' ||
+    fbAction === 'step_up_otp' ||
+    fbAction === 'silent_reauth'
+  );
+
+  const isElevated = !isFrozenOrCritical && !isAutomatedCall && !isHighRisk && (
+    label === 'ELEVATED' ||
+    (label === 'NORMAL' && tSession > 0)
+  );
+
+  const isClean = !isFrozenOrCritical && !isAutomatedCall && !isHighRisk && !isElevated;
+
+  // ── Fallback banner ───────────────────────────────────────────────
+  const fb = document.getElementById('fallback');
+  const fm = document.getElementById('fallbackMsg');
+  if (isFrozenOrCritical) {
+    fb.className = 'fallback show crit';
+    fm.textContent = (st.fallback?.action === 'bank_review' && st.fallback?.message)
+      ? st.fallback.message
+      : 'The bank has flagged this session for mandatory compliance review. Transaction cancelled. Account secured. Funds have not moved.';
+  } else if (st.fallback?.triggered) {
+    fb.className = 'fallback show' + (st.fallback.action === 'bank_review' ? ' crit' : '');
+    fm.textContent = st.fallback.message;
+  } else {
+    fb.className = 'fallback';
+    fm.textContent = '';
+  }
+
+  // ── Main render — progressive escalation ─────────────────────────
+  if (isFrozenOrCritical) {
+    // Tier 3 — permanent bank review. No auto-reset.
+    // Distinguish WHY this fired, using the backend's authoritative
+    // pending_tx fields, purely for clearer messaging — the ESCALATION
+    // DECISION itself was already made server-side.
+    const pt = st.pending_tx || {};
+    let reason;
+    if (pt.force_immediate_kyc) {
+      reason = `Transfer amount ₹${(pt.amount||0).toLocaleString('en-IN')} requires mandatory KYC verification before processing — high-value transactions are escalated immediately regardless of session history.`;
+    } else if (pt.is_retry) {
+      reason = `A previous transaction to this beneficiary already required verification. Repeated high-risk attempts to the same beneficiary require mandatory KYC. Transaction cancelled.`;
+    } else {
+      reason = `Risk score: ${c}/100. This transaction has been placed under mandatory bank compliance review. No funds have moved. Your account is secured. Please visit your branch with valid KYC documents to resume transactions.`;
+    }
+    showResp('crit','Transaction Under Bank Review', reason, sigs, st.tx_ml_result);
+    btn.innerHTML='Under Bank Review';
+    btn.style.background='#7f1d1d';
+    btn.disabled=true;
+    // Show persistent "New Transfer" button (judges can reset manually)
+    showNewTransferBtn('After completing KYC verification, click to start a new transaction.');
+
+  } else if (isAutomatedCall) {
+    // New rung between OTP and freeze: an automated outbound call to the
+    // customer's registered mobile, asking them to confirm via secure
+    // keypad PIN entry — rather than a one-time code typed back into the
+    // same (potentially compromised) browser session. Backend decision
+    // is authoritative (fbAction === 'automated_call'); this only renders it.
+    showResp('hold','Automated Verification Call Initiated',
+      `Risk score: ${c}/100. Bank has initiated an automated call to your registered mobile number ending XXXX. Please answer and enter your secure PIN on the keypad to confirm this transaction. Transaction held pending call confirmation.`,
+      sigs, st.tx_ml_result);
+    btn.innerHTML='Awaiting Call Confirmation...';
+    btn.disabled=true;
+    btn.style.background='#9a3412';
+    // DO NOT auto-reset — judges should see this state persist.
+    // NOTE: deliberately no "retry" hint here — a retry to this SAME
+    // beneficiary is tracked server-side (flagged_attempts) and will
+    // correctly escalate to compliance review on the backend's own
+    // merits, regardless of what the user does in the UI.
+    showNewTransferBtn('Complete the verification call on your registered mobile, then click below to continue.');
+
+  } else if (isHighRisk) {
+    // Progressive escalation messaging — the ESCALATION DECISION itself
+    // (whether this is OTP-only vs KYC-immediately vs compliance-review-
+    // for-a-retry) is made authoritatively by the BACKEND in
+    // SuspicionScorer._fallback(), using flagged_attempts (per-beneficiary,
+    // score-independent). By the time we're in this branch, fbAction is
+    // already either 'step_up_otp' or 'silent_reauth' — a genuine
+    // retry or force_immediate_kyc case would have set fbAction to
+    // 'bank_review' instead, which routes through isFrozenOrCritical
+    // above, not here. This branch only formats the message using
+    // st.pending_tx for extra context; it makes no escalation decisions.
+    const pt = st.pending_tx || {};
+    const isVeryHighAmount = !!pt.force_immediate_kyc;
+
+    showResp('hold','OTP Verification Required',
+      isVeryHighAmount
+        ? `Risk score: ${c}/100. This transaction requires additional verification. An OTP has been sent to your registered mobile +91-XXXXX-X4821. Transaction is on hold for 10 minutes.`
+        : `Risk score: ${c}/100. This transaction requires additional verification. An OTP has been sent to your registered mobile +91-XXXXX-X4821. Transaction is on hold for 10 minutes.`,
+      sigs, st.tx_ml_result);
+    btn.innerHTML='Awaiting OTP Confirmation...';
+    btn.disabled=true;
+    // DO NOT auto-reset — show persistent message with "New Transfer" button.
+    // NOTE: this hint deliberately does NOT say "retry after verification" —
+    // a retry to this SAME beneficiary is tracked server-side and will
+    // correctly escalate to compliance review on the backend's own merits,
+    // regardless of what the user does in the UI.
+    showNewTransferBtn('Complete OTP verification on your registered mobile, then click below to continue.');
+
+  } else if (isElevated) {
+    showResp('warn','Transfer Approved — Monitoring Active',
+      `Risk score: ${c}/100. Transaction processed. Bank security is monitoring this session.`,
+      sigs, st.tx_ml_result);
+    // Persist briefly, then show "New Transfer" button — no auto-dismiss
+    setTimeout(()=>showNewTransferBtn(''),3000);
+
+  } else {
+    // Clean — approved immediately, show for 3s then "New Transfer" button
+    showResp('clear','Transfer Approved',
+      'Transaction processed successfully. No anomalies detected.',
+      sigs, st.tx_ml_result);
+    btn.innerHTML='<i class="ti ti-check"></i> Transfer Successful';
+    btn.style.background='#15803d';
+    setTimeout(()=>{
+      showNewTransferBtn('');
+    },3000);
+  }
+
+  updateShield(c);
+}
+
+// ── Show "New Transfer" button ────────────────────────────────
+// Replaces auto-setTimeout(resetXfer) — judges see the result and
+// manually advance to the next scenario by clicking this button.
+function showNewTransferBtn(hint){
+  const existing = document.getElementById('newXferBtn');
+  if(existing) existing.remove();
+
+  const wrap = document.createElement('div');
+  wrap.id = 'newXferBtn';
+  wrap.style.cssText = 'margin-top:12px;text-align:center';
+
+  if(hint){
+    const p = document.createElement('p');
+    p.style.cssText = 'font-size:10px;color:#64748b;margin-bottom:8px;line-height:1.4';
+    p.textContent = hint;
+    wrap.appendChild(p);
+  }
+
+  const btn = document.createElement('button');
+  btn.textContent = 'New Transfer';
+  btn.style.cssText = 'padding:8px 24px;background:#0ea5e9;border:none;border-radius:7px;color:#fff;font-size:12px;font-weight:600;cursor:pointer';
+  btn.onclick = ()=>{ resetXfer(); wrap.remove(); };
+  wrap.appendChild(btn);
+
+  // Append after the response panel
+  const resp = document.getElementById('resp');
+  if(resp && resp.parentNode) resp.parentNode.insertBefore(wrap, resp.nextSibling);
+}
+
+function showResp(cls,title,detail,sigs,txMl){
+  const rb=document.getElementById('resp');
+  rb.className='resp show '+cls;
+  document.getElementById('respTitle').textContent=title;
+  document.getElementById('respDetail').textContent=detail;
+  const sb=document.getElementById('sigBox');
+  const sl=document.getElementById('sigList');
+  if(sigs&&sigs.length){
+    sb.style.display='block';
+    sl.innerHTML=sigs.map(s=>{
+      const lbl=s.signal||s.lbl||'';
+      const pts=s.pts||'';
+      const resp=s.response||s.resp||'';
+      return `<div class="sig-row"><span>${lbl}</span><span class="sig-pts" style="color:#f97316">${pts}</span></div>
+              <div class="sig-resp">${resp}</div>`;
+    }).join('');
+  } else { sb.style.display='none'; }
+
+  // Show TX ML result if available
+  const mlBox = document.getElementById('txMlBox');
+  if(txMl && txMl.model_active && mlBox){
+    const col = txMl.fraud_pct>=65?'#ef4444':txMl.fraud_pct>=45?'#f97316':txMl.fraud_pct>=30?'#eab308':'#22c55e';
+    mlBox.style.display='block';
+    mlBox.innerHTML=`
+      <div style="font-size:10px;font-weight:700;color:#6366f1;margin-bottom:5px">
+        TRANSACTION ML MODEL (PSB Dataset)
+      </div>
+      <div style="display:flex;gap:16px;align-items:center">
+        <div>
+          <div style="font-size:9px;color:#64748b">Fraud Probability</div>
+          <div style="font-size:20px;font-weight:700;color:${col}">${txMl.fraud_pct.toFixed(1)}%</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:#64748b">Risk Label</div>
+          <div style="font-size:13px;font-weight:600;color:${col}">${txMl.risk_label}</div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:9px;color:#64748b">Short-window / Velocity</div>
+          <div style="font-size:11px;color:#94a3b8">win1=${txMl.win1_mean} · vel=${txMl.win2_std}</div>
+        </div>
+      </div>
+      <div style="font-size:9px;color:#475569;margin-top:4px">${txMl.confidence_note||''}</div>`;
+  } else if(mlBox){ mlBox.style.display='none'; }
+}
+
+function resetXfer(){
+  document.getElementById('xferBtn').innerHTML='<i class="ti ti-send"></i> Transfer Now';
+  document.getElementById('xferBtn').style.cssText='';
+  document.getElementById('xferBtn').disabled=false;
+  document.getElementById('resp').className='resp';
+  document.getElementById('fallback').className='fallback';
+  // Remove persistent "New Transfer" button if present
+  const nb = document.getElementById('newXferBtn');
+  if(nb) nb.remove();
+  // NOTE: deliberately does NOT touch any retry/attempt-history state —
+  // that lives server-side in SuspicionScorer.flagged_attempts and must
+  // survive this UI-only reset (see comment near render() above). This
+  // function only resets the FORM/UI back to a ready state.
+  updateShield(0);
+}
+
+// ── INIT ─────────────────────────────────────────────────────
+window.onload=()=>{
+  updateBar(bSession,0);
+  initDemoHour();
+  setTimeout(openDash,600);
+  // Show device status if carried from login
+  if(profile==='arjun_new_device'){
+    showDeviceRow({status:'new',label:'Unknown device',sessions:0,
+      tx_limit:10000,message:'New unrecognised device — probationary state'});
+  }
+  // Forward initial state to dashboard
+  setTimeout(()=>{
+    if(dashWin&&!dashWin.closed) dashWin.postMessage({
+      behavioural_score:_sig(bSession,_BK,_BMID),
+      transaction_score:0, combined_score:bSession,
+      tier:tier(bSession), signals:[], fallback:{triggered:false}
+    },'*');
+  },1200);
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+scikit-learn>=1.3
+numpy
+joblib
+pandas
+# No additional dependencies needed for ThreatShield — pure stdlib
