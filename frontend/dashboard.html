@@ -15,6 +15,25 @@ body{background:#0b0f1a;color:#f1f5f9;font-family:'Courier New',Consolas,monospa
 .shell{display:grid;grid-template-rows:auto auto auto 1fr auto;
   gap:9px;padding:13px;min-height:100vh;max-width:1200px;margin:0 auto}
 
+/* ── SCORE CONTRIBUTOR BREAKDOWN ──
+   Stacked bar showing what fraction of the current combined_score
+   came from each layer: behavioural signals, ThreatShield (Layer 0,
+   pre-entry phishing detection), and transaction anomalies. The
+   existing signal log (mini-sigs / bList / tList) shows individual
+   events as they fire; this answers the higher-level question
+   "of my current score, how much came from where" at a glance,
+   without scrolling back through the log to add it up. */
+.breakdown-panel{background:#111827;border:1px solid rgba(148,163,184,.12);
+  border-radius:10px;padding:13px 15px;margin-top:9px}
+.breakdown-lbl{font-size:10px;letter-spacing:.07em;color:#475569;margin-bottom:9px}
+.breakdown-bar{display:flex;height:10px;border-radius:5px;overflow:hidden;
+  background:rgba(148,163,184,.08);margin-bottom:9px}
+.breakdown-seg{height:100%;transition:width .5s ease}
+.breakdown-legend{display:flex;flex-wrap:wrap;gap:13px}
+.bd-item{display:flex;align-items:center;gap:6px;font-size:10.5px;color:#94a3b8}
+.bd-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+.bd-pct{font-weight:700;color:#f1f5f9;margin-left:2px}
+
 /* ── HEADER ── */
 .hdr{display:flex;align-items:center;justify-content:space-between;
   padding:11px 17px;background:#111827;border:1px solid rgba(148,163,184,.12);border-radius:13px}
@@ -247,6 +266,21 @@ body{background:#0b0f1a;color:#f1f5f9;font-family:'Courier New',Consolas,monospa
       <span id="ms-d"><i class="ti ti-device-desktop"></i> Device — checking</span>
       <span id="ms-t"><i class="ti ti-coin"></i> Transactions — normal</span>
     </div>
+
+    <!-- Score contributor breakdown -->
+    <div class="breakdown-panel">
+      <div class="breakdown-lbl">SCORE BREAKDOWN — WHERE THE RISK CAME FROM</div>
+      <div class="breakdown-bar" id="bdBar">
+        <div class="breakdown-seg" id="bdSegBehav" style="width:0%;background:#38bdf8"></div>
+        <div class="breakdown-seg" id="bdSegThreat" style="width:0%;background:#a855f7"></div>
+        <div class="breakdown-seg" id="bdSegTx" style="width:0%;background:#f97316"></div>
+      </div>
+      <div class="breakdown-legend">
+        <span class="bd-item"><span class="bd-dot" style="background:#38bdf8"></span>Behavioural <span class="bd-pct" id="bdPctBehav">0%</span></span>
+        <span class="bd-item"><span class="bd-dot" style="background:#a855f7"></span>ThreatShield <span class="bd-pct" id="bdPctThreat">0%</span></span>
+        <span class="bd-item"><span class="bd-dot" style="background:#f97316"></span>Transaction <span class="bd-pct" id="bdPctTx">0%</span></span>
+      </div>
+    </div>
   </div>
 
   <!-- Right col -->
@@ -414,6 +448,14 @@ const DEMO_T={
 
 // ── STATE ────────────────────────────────────────────────────
 let bRaw=0,tRaw=0,combined=0;
+// threatRaw: cumulative ThreatShield (Layer 0) points seen this session.
+// Tracked SEPARATELY from bRaw for the breakdown widget only — the
+// backend still folds these into b_raw for actual scoring (unchanged).
+// This is purely a display-side split so the breakdown can show
+// "how much of my score is pre-entry phishing detection vs in-session
+// behaviour", which isn't otherwise visible since both currently
+// arrive tagged onto the same b_raw accumulator.
+let threatRaw=0;
 let prof='legit';
 let frozen=false;
 let history=new Array(60).fill(0);
@@ -548,6 +590,7 @@ function updateUI(){
   document.getElementById('actionTxt').textContent=TIERS[t].action;
 
   updateMiniSigs(t);
+  updateBreakdown(b,tv);
 
   history.push(c);
   if(history.length>60) history.shift();
@@ -584,6 +627,40 @@ function updateMiniSigs(t){
   const txTxt=t>=2?'HIGH RISK':t===1?'monitoring':'normal';
   const txCol=t>=2?C.r:t===1?C.y:C.m;
   ms('ms-t','coin','Transactions — '+txTxt,txCol);
+}
+
+// ── SCORE CONTRIBUTOR BREAKDOWN ──────────────────────────────
+// Splits the current combined_score into three shares — pure
+// behavioural signal, ThreatShield (Layer 0, pre-entry phishing
+// detection), and transaction anomaly — so an analyst/judge can see
+// at a glance WHERE the risk is coming from, not just THAT it's
+// elevated. b and tv are the already-computed sigmoid-compressed
+// behavioural/transaction sub-scores (0-100) updateUI() passes in.
+function updateBreakdown(b,tv){
+  // ThreatShield's share of the behavioural sub-score, approximated
+  // by its proportion of raw accumulated points within b_raw. This
+  // is a display-side estimate (the sigmoid compression isn't
+  // linearly separable), not a recomputation of the backend's actual
+  // scoring — good enough for "where did this come from", not meant
+  // to be read as an exact point-for-point ledger.
+  const threatShare = bRaw>0 ? Math.min(1,threatRaw/bRaw) : 0;
+  const threatPortion = b*threatShare;
+  const behavPortion  = b*(1-threatShare);
+  const total = behavPortion+threatPortion+tv;
+
+  let pB=0,pT=0,pX=0;
+  if(total>0.01){
+    pB=Math.round(behavPortion/total*100);
+    pT=Math.round(threatPortion/total*100);
+    pX=100-pB-pT; // remainder, avoids 99%/101% rounding drift
+  }
+
+  document.getElementById('bdSegBehav').style.width=pB+'%';
+  document.getElementById('bdSegThreat').style.width=pT+'%';
+  document.getElementById('bdSegTx').style.width=pX+'%';
+  document.getElementById('bdPctBehav').textContent=pB+'%';
+  document.getElementById('bdPctThreat').textContent=pT+'%';
+  document.getElementById('bdPctTx').textContent=pX+'%';
 }
 
 // ── DEVICE PANEL UPDATE ──────────────────────────────────────
@@ -768,7 +845,7 @@ setInterval(()=>{
 // ── PROFILE SWITCH ───────────────────────────────────────────
 function setProf(p){
   // Full reset before switching — prevents signal compounding across profiles
-  bRaw=0;tRaw=0;combined=0;frozen=false;
+  bRaw=0;tRaw=0;combined=0;frozen=false;threatRaw=0;
   shownTier=0;tierTimes={};hardenActive=false;
   allSigs=[];bSigs=[];tSigs=[];
   if(dwellInterval){clearInterval(dwellInterval);dwellInterval=null;}
@@ -806,7 +883,7 @@ function setProf(p){
 
 // ── RESET ────────────────────────────────────────────────────
 function resetAll(){
-  bRaw=0;tRaw=0;combined=0;
+  bRaw=0;tRaw=0;combined=0;threatRaw=0;
   prof='legit';frozen=false;
   shownTier=0;tierTimes={};hardenActive=false;
   history=new Array(60).fill(0);
@@ -844,12 +921,23 @@ window.addEventListener('message',(e)=>{
   bRaw=s.b_raw||0;
   tRaw=s.t_raw||0;
   combined=s.combined_score||0;
+  // bRaw decays over time on the backend; threatRaw must never exceed
+  // it (a stale, larger threatRaw would make the breakdown show a
+  // ThreatShield share bigger than the actual behavioural total).
+  if(threatRaw>bRaw) threatRaw=bRaw;
 
   if(Array.isArray(s.signals)){
     s.signals.slice(0,4).forEach(sig=>{
       const l=sig.layer==='transaction'?'t':'b';
       const isDev=sig.layer==='device';
       pushSig(l,sig.signal||'',sig.pts||'',sig.response||'',isDev);
+      // Track ThreatShield's slice of b_raw separately for the
+      // breakdown widget. The backend already folds these points
+      // into b_raw for actual scoring — this is a display-only split.
+      if(sig.layer==='threat_shield'){
+        const pn=parseInt(sig.pts);
+        if(!isNaN(pn)) threatRaw=Math.min(bRaw,threatRaw+pn);
+      }
     });
   }
 
