@@ -667,6 +667,28 @@ function addBRaw(pts){
 function doLogin(){
   const btn=document.getElementById('loginBtn');
 
+  // ── CREDENTIAL GATE: username + password must actually be filled ──
+  // This runs BEFORE any severity/tier logic below. Previously, an
+  // empty username or password field had no check at all — login
+  // would "succeed" (or fall through to the tier logic) regardless
+  // of whether real credentials were entered, because the rest of
+  // this function only gates on behavioural score (isElevated/
+  // isHighRisk/isCritical), not on field contents.
+  const userVal = document.getElementById('username').value.trim();
+  const passVal = document.getElementById('password').value.trim();
+  if(!userVal || !passVal){
+    btn.innerHTML = !userVal
+      ? 'Enter your Customer ID first'
+      : 'Enter your password first';
+    btn.style.cssText='width:100%;padding:13px;border-radius:8px;font-size:14px;font-weight:600;background:#7f1d1d;color:#fca5a5;border:1px solid #ef4444;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px';
+    // PS-3 Goal 4: an incomplete/blocked login attempt hardens the
+    // session for subsequent tries, same as the phrase-gate and
+    // critical-block paths below.
+    if(shield) shield.trigger({type:'failed_login',reason:'missing_credentials'});
+    setTimeout(resetBtn,2000);
+    return; // HARD GATE — do not proceed without real credentials
+  }
+
   // ── Determine session severity ──────────────────────────────
   // When the backend is connected, use its AUTHORITATIVE state
   // (tier_label, frozen, fallback) — the same fields scorer.py's
