@@ -1296,6 +1296,85 @@ def test_call_triggered_clears_on_deescalation_below_tier_2():
     assert s._call is False, "call flag must clear on de-escalation below tier 2"
 
 
+# ═══════════════════════════════════════════════════════════════
+# PS-3 GOAL 4: LOGIN HARDENING AFTER FAILED ATTEMPTS
+# ═══════════════════════════════════════════════════════════════
+
+def test_first_failed_login_activates_security_phrase():
+    """First blocked/failed login attempt must activate security phrase
+    hardening (progressive_harden=True) with a mild b_raw increase,
+    but NOT yet require OTP or trigger the automated call."""
+    s = SuspicionScorer(PROFILES["arjun"])
+    r = s.process_event({"type": "failed_login", "reason": "phrase_gate"})
+    assert s.failed_login_count == 1
+    assert s._harden is True
+    assert s._otp is False
+    assert s._call is False
+    assert s.b_raw > 0
+
+
+def test_second_failed_login_escalates_to_otp():
+    """Second failed login attempt must escalate to OTP requirement,
+    independent of combined_score — satisfying PS-3 Goal 4's progressive
+    hardening requirement."""
+    s = SuspicionScorer(PROFILES["arjun"])
+    s.process_event({"type": "failed_login"})
+    r = s.process_event({"type": "failed_login"})
+    assert s.failed_login_count == 2
+    assert s._otp is True
+    assert s._call is False
+    assert s._frozen is False
+
+
+def test_third_failed_login_triggers_call_and_freeze():
+    """Third+ failed login attempt must trigger the automated call AND
+    freeze the session — the most severe response — regardless of
+    behavioural score. This is the literal PS-3 Goal 4 requirement:
+    'Harden the login process after unsuccessful login attempts.'"""
+    s = SuspicionScorer(PROFILES["arjun"])
+    for _ in range(3):
+        s.process_event({"type": "failed_login"})
+    assert s.failed_login_count == 3
+    assert s._call is True
+    assert s._frozen is True
+    st = s.state()
+    assert st["tier_label"] == "CRITICAL"
+
+
+def test_failed_login_count_cleared_by_reset_only():
+    """failed_login_count must be cleared by reset() and ONLY reset() —
+    not by any other event, not by normal login_attempt events, not by
+    transaction events. A UI action clearing this history would let an
+    attacker erase their own failed-login record."""
+    s = SuspicionScorer(PROFILES["arjun"])
+    s.process_event({"type": "failed_login"})
+    s.process_event({"type": "failed_login"})
+    assert s.failed_login_count == 2
+
+    # Unrelated events must NOT clear it
+    s.process_event({"type": "keystroke", "dwell_ms": 95})
+    s.process_event({"type": "mouse_idle", "micro_movement_px": 5})
+    assert s.failed_login_count == 2
+
+    s.reset()
+    assert s.failed_login_count == 0
+
+
+def test_normal_session_never_increments_failed_login_count():
+    """A clean session with normal typing and a clean transaction must
+    NEVER increment failed_login_count — the counter only moves when a
+    `failed_login` event is explicitly fired (by doLogin() when it
+    blocks an attempt), not from any other signal."""
+    s = SuspicionScorer(PROFILES["arjun"])
+    for _ in range(5):
+        s.process_event({"type": "keystroke", "dwell_ms": 95})
+    s.process_event({"type": "transaction_attempt", "amount": 5000,
+                      "beneficiary": "SBI-XXXX1234", "hour": 14})
+    assert s.failed_login_count == 0, (
+        f"Normal session must not increment failed_login_count, "
+        f"got {s.failed_login_count}")
+
+
 if __name__ == "__main__":
     tests = []
     for k, v in list(globals().items()):

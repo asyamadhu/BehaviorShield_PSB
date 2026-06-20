@@ -466,6 +466,7 @@ class SuspicionScorer:
         # Survives for the lifetime of this SuspicionScorer instance and is
         # only cleared by reset() (manual review), never by UI actions.
         self.flagged_attempts = {}
+        self.failed_login_count = 0  # PS-3 Goal 4: counts blocked login attempts
 
         # Most recent transaction's amount_ratio (amount / avg_transfer_amount).
         # Defaults to 0.0 — meaning "no transaction in this session yet",
@@ -802,6 +803,24 @@ class SuspicionScorer:
                 self._add_b(pts, event.get("label", "ThreatShield signal"),
                              layer="threat_shield")
 
+        elif t == "failed_login":
+            # PS-3 Goal 4: "Harden the login process after unsuccessful
+            # login attempts." Fired by doLogin() when the attempt is
+            # blocked (CRITICAL) or the security-phrase gate fires.
+            # Each failed attempt injects direct b_raw points —
+            # INDEPENDENT of combined_score — so the session hardens
+            # progressively even when the password itself is correct:
+            #   attempt 1: +25 pts -> security phrase tier
+            #   attempt 2: +40 pts -> OTP tier
+            #   attempt 3+: +60 pts -> automated call / freeze
+            self.failed_login_count += 1
+            n = self.failed_login_count
+            pts = 25 if n == 1 else 40 if n == 2 else 60
+            self._add_b(pts, f"Failed/blocked login attempt {n} — session hardened per PS-3 Goal 4")
+            self._harden = True
+            if n >= 2: self._otp = True
+            if n >= 3: self._call = True
+
         # Natural decay — legit users drift to 0, attackers keep adding
         self.b_raw = max(0.0, self.b_raw * 0.97)
         self.t_raw = max(0.0, self.t_raw * 0.98)
@@ -1090,6 +1109,7 @@ class SuspicionScorer:
             "progressive_harden": self._harden or self._force_harden,
             "otp_triggered":      self._otp,
             "call_triggered":     self._call,
+            "failed_login_count":  self.failed_login_count,
             "frozen":             self._frozen,
             "time_to_next_tier":  self._time_to_next(),
             "deescalation_streak": self._deescalation_streak,
@@ -1187,6 +1207,7 @@ class SuspicionScorer:
         self._frozen      = False
         self._force_harden= False
         self.flagged_attempts = {}
+        self.failed_login_count = 0
         # ^ Deliberately cleared here, and ONLY here. reset() represents
         # backend-driven manual review / session reset — not a UI
         # "New Transfer" button click, which must NOT clear this (a UI

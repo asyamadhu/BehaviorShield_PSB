@@ -430,3 +430,53 @@ no longer have a flat plateau/discontinuity at the `t_raw=70` boundary.
 e.g. `t_raw in [60, 80]`, so `combined_score` (and therefore `raw_tier`
 and `display_tier`) changes continuously across this boundary in both
 directions (escalating and decaying).
+
+---
+
+## #10 — PS-3 Goal 4 tests were unreachable by the standalone runner (FIXED in this revision)
+
+**Where:** `test_scorer.py` — the 5 tests for `failed_login` / PS-3 Goal 4
+hardening (`test_first_failed_login_activates_security_phrase`,
+`test_second_failed_login_escalates_to_otp`,
+`test_third_failed_login_triggers_call_and_freeze`,
+`test_failed_login_count_cleared_by_reset_only`,
+`test_normal_session_never_increments_failed_login_count`).
+
+**Symptom:** When the `failed_login` feature was added, its 5 tests
+were appended to the BOTTOM of `test_scorer.py`, AFTER the
+`if __name__ == "__main__":` block that collects and runs every
+`test_*` function from `globals()`. Running `python test_scorer.py`
+printed `32 passed, 0 failed` — identical to the count BEFORE the
+feature was added — because the test-runner loop executes before the
+Python interpreter reaches the function definitions located below it
+in the file. The 5 new functions existed in the module but were never
+collected into the `tests` list, so they silently never ran.
+
+**Root cause:** `for k, v in list(globals().items())` only sees names
+that have been bound by the time that line executes. Functions defined
+textually below the `if __name__ == "__main__":` guard are not yet
+bound when the guard's body runs (top-to-bottom module execution),
+even though they exist later in the same file.
+
+**Verification:** Manually importing and calling the 5 functions
+directly (bypassing the runner) confirmed all 5 pass — the
+*underlying logic* was correct from the start; only the runner's
+visibility into them was broken. This means the feature itself was
+never broken, but the test suite was silently overstating its own
+coverage: anyone trusting the "32 passed" printout as confirmation
+that the new feature was tested would have been wrong.
+
+**Fix applied:** Moved all 5 `test_failed_login_*` /
+`test_*_failed_login_*` function definitions (plus their section
+header comment) to immediately ABOVE the
+`if __name__ == "__main__":` block, alongside every other test
+function in the file. No logic was changed — this was a pure
+relocation. Re-running `python test_scorer.py` now correctly reports
+`37 passed, 0 failed`.
+
+**Lesson for future additions:** Any new `test_*` function added to
+this file MUST be placed above the `if __name__ == "__main__":` guard
+near the end of the file, never below it. Consider adding a one-line
+assertion at the top of the runner block (e.g.
+`assert len(tests) >= <expected_count>`) as a tripwire against this
+exact mistake recurring silently in a future revision.

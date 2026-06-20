@@ -521,6 +521,38 @@ function checkCallBanner(callTriggered){
   else               cb.classList.remove('show');
 }
 
+// ── FAILED LOGIN ATTEMPT BADGE ───────────────────────────────
+// Shows a visible attempt counter below the login button so judges
+// can see the PS-3 Goal 4 hardening in real time — "Login attempts
+// blocked: N — session has been hardened" appears after the first
+// failed/blocked attempt, counts up with each block, and clears on
+// session reset.
+function updateFailedLoginBadge(count){
+  let badge = document.getElementById('failedLoginBadge');
+  if(!badge){
+    badge = document.createElement('div');
+    badge.id = 'failedLoginBadge';
+    badge.style.cssText = 'display:none;margin-top:8px;padding:7px 12px;' +
+      'background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);' +
+      'border-radius:7px;font-size:11px;color:#ef4444;font-family:monospace;text-align:center';
+    const btn = document.getElementById('loginBtn');
+    if(btn && btn.parentNode) btn.parentNode.insertBefore(badge, btn.nextSibling);
+  }
+  if(count > 0){
+    badge.style.display = 'block';
+    badge.textContent = 'Login attempts blocked: ' + count +
+      ' — BehaviorShield has hardened this session' +
+      (count >= 3 ? ' (CRITICAL — contact branch)' : count >= 2 ? ' (OTP required on next attempt)' : ' (security phrase active)');
+    badge.style.borderColor = count >= 3 ? 'rgba(239,68,68,.6)' :
+                              count >= 2 ? 'rgba(249,115,22,.5)' : 'rgba(234,179,8,.4)';
+    badge.style.color       = count >= 3 ? '#ef4444' : count >= 2 ? '#f97316' : '#eab308';
+    badge.style.background  = count >= 3 ? 'rgba(239,68,68,.1)' :
+                              count >= 2 ? 'rgba(249,115,22,.08)' : 'rgba(234,179,8,.06)';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
 // ── DEVICE STATE HANDLER ─────────────────────────────────────
 function handleDevice(ds){
   if(!ds) return;
@@ -585,6 +617,7 @@ function setProfile(p){
     checkHardening(stDisplay.combined_score, stDisplay.progressive_harden);
     checkCallBanner(stDisplay.call_triggered);
     syncLoginButton(stDisplay);
+    updateFailedLoginBadge(st.failed_login_count||0);
     if(st.device_state) handleDevice(st.device_state);
   };
 
@@ -692,6 +725,9 @@ function doLogin(){
       btn.style.cssText='width:100%;padding:13px;border-radius:8px;font-size:14px;font-weight:600;background:#854d0e;color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px';
       wrap.style.animation='none'; void wrap.offsetWidth;
       wrap.style.animation='shake .4s ease';
+      // PS-3 Goal 4: fire failed_login so backend increments
+      // failed_login_count and hardens the session for this attempt.
+      if(shield) shield.trigger({type:'failed_login',reason:'phrase_gate'});
       setTimeout(resetBtn,2500);
       return; // HARD GATE
     }
@@ -704,6 +740,8 @@ function doLogin(){
     btn.style.cssText='width:100%;padding:13px;border-radius:8px;font-size:14px;font-weight:600;background:#7f1d1d;color:#fca5a5;border:1px solid #ef4444;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px';
     btn.disabled=true;
     setStatus('CRITICAL — bank review initiated','#ef4444');
+    // PS-3 Goal 4: blocked login attempt — harden session for subsequent tries
+    if(shield) shield.trigger({type:'failed_login',reason:'critical_block'});
     return;
   }
 
