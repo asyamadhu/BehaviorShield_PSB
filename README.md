@@ -10,7 +10,7 @@
 
 BehaviorShield authenticates users **continuously throughout their session** — not just at login. Every keystroke, mouse movement, and transaction is scored in real time. A legitimate user never sees a prompt. A bot, credential-stuffed attacker, or social-engineering victim is escalated through four progressive security tiers, with funds held and the account secured before any money moves.
 
-It also directly satisfies **PS-3 Goal 4 — "harden the login process after unsuccessful login attempts"** — via a standalone failed-login escalation ladder, independent of the behavioural score (see below).
+
 
 ---
 
