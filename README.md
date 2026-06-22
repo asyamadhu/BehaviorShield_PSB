@@ -2,7 +2,7 @@
 
 **AI-Driven Behavioural Authentication for Public Sector Digital Banking**
 
-> PSB Hackathon Series 2026 · Problem Statement 1 · Team ABELIAN · IIIT Senapati · MNNIT Allahabad
+> 
 
 ---
 
@@ -204,9 +204,6 @@ A real PSB transaction dataset (`DataSet__1_.csv`, ~9,082 records, 3,924 anonymi
 
 ---
 
-## Team
+ · IIIT Senapati
 
-**ABELIAN** · IIIT Senapati
 
-PSB Hackathon Series 2026 · Problem Statement 1 · AI-Driven Behavioral Authentication for Digital Banking
-Sponsored by Central Bank of India · Hosted at MNNIT Allahabad
