@@ -433,7 +433,7 @@ directions (escalating and decaying).
 
 ---
 
-## #10 — PS-3 Goal 4 tests were unreachable by the standalone runner (FIXED in this revision)
+## #10 — PS Goal 4 tests were unreachable by the standalone runner (FIXED in this revision)
 
 **Where:** `test_scorer.py` — the 5 tests for `failed_login` / PS-3 Goal 4
 hardening (`test_first_failed_login_activates_security_phrase`,
