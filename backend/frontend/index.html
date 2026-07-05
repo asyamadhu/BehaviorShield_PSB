@@ -83,6 +83,46 @@ input:focus{border-color:#38bdf8}
   border-radius:8px;font-size:11px;color:#f97316;font-family:'Courier New',monospace}
 .call-banner.show{display:block;animation:fadein .4s}
 
+/* ── KBA (security question) gate — Tier 2, alongside OTP ──
+   Same visual language as .phrase-wrap (both are "type something to
+   proceed" gates) but on its own color (amber->orange progression:
+   phrase=amber #f97316 already used, so KBA uses a slightly deeper
+   orange-red #ea580c to read as "one step further" without colliding
+   with the CRITICAL red #ef4444 reserved for freeze/bank_review). */
+.kba-wrap{display:none}
+.kba-wrap.show{display:block;animation:fadein .4s}
+.kba-wrap label{color:#ea580c}
+.kba-wrap input{border-color:rgba(234,88,12,.4)}
+.kba-question{font-size:12px;color:#fdba74;background:rgba(234,88,12,.08);
+  border:1px solid rgba(234,88,12,.3);border-radius:6px;padding:8px 10px;margin:6px 0}
+.kba-hint{font-size:10px;color:#64748b;margin-top:4px}
+.kba-submit-btn{width:100%;margin-top:8px;padding:9px;border-radius:6px;
+  font-size:12px;font-weight:600;background:#ea580c;color:#fff;border:none;cursor:pointer}
+.kba-submit-btn:disabled{opacity:.6;cursor:not-allowed}
+
+/* ── Automated call — interactive question C (the "3rd chance") ──
+   Separate element from .call-banner (which stays a passive info
+   strip for other call_triggered causes, e.g. 3 failed logins). This
+   one specifically appears when 2 KBA answers have failed and a
+   third, different question is being asked over the (simulated)
+   call. Red-leaning border communicates real stakes: pass -> capped +
+   monitored, fail -> permanent freeze. */
+.call-verify-wrap{display:none;margin-top:10px;padding:10px 12px;
+  background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.4);
+  border-radius:8px}
+.call-verify-wrap.show{display:block;animation:fadein .4s}
+.call-verify-wrap label{color:#ef4444;font-size:11px;font-weight:600;display:flex;
+  align-items:center;gap:5px}
+.call-verify-wrap input{width:100%;margin-top:6px;background:#1e293b;
+  border:1px solid rgba(239,68,68,.4);border-radius:6px;padding:8px 10px;
+  color:#f1f5f9;font-size:12px;outline:none}
+.call-verify-question{font-size:12px;color:#fca5a5;background:rgba(239,68,68,.08);
+  border:1px solid rgba(239,68,68,.3);border-radius:6px;padding:8px 10px;margin:6px 0}
+.call-verify-hint{font-size:10px;color:#64748b;margin-top:4px}
+.call-verify-btn{width:100%;margin-top:8px;padding:9px;border-radius:6px;
+  font-size:12px;font-weight:600;background:#ef4444;color:#fff;border:none;cursor:pointer}
+.call-verify-btn:disabled{opacity:.6;cursor:not-allowed}
+
 /* ── Login button ── */
 .login-btn{width:100%;margin-top:20px;padding:13px;background:#0ea5e9;
   border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:600;
@@ -236,6 +276,33 @@ input:focus{border-color:#38bdf8}
     <div class="phrase-hint">Per-key timing verification. Type at your normal pace.</div>
   </div>
 
+  <!-- KBA (Knowledge-Based Authentication) gate — Tier 2, alongside
+       OTP. Even if an attacker has the correct password, they were
+       never in the room when the user set up these answers. Never
+       repeats a question within one hardening episode: question A,
+       then (if wrong) a DIFFERENT question B — two wrong answers
+       route to the automated call below, not a third try here. -->
+  <div class="kba-wrap" id="kbaWrap">
+    <label for="kbaAnswer">
+      <i class="ti ti-help-circle"></i> Security Question
+      <span style="font-size:10px;font-weight:400;color:#ea580c"> — Set up during registration</span>
+    </label>
+    <!-- Persistent OTP co-requirement note. Tier 2 requires OTP AND
+         KBA CONCURRENTLY (both flip on together the moment the tier is
+         reached) — this note must live inside the box itself so it is
+         visible for the whole time the box is shown, not just briefly
+         before/after the question is answered. Do not gate this on any
+         st flag; it should say the same thing every time this box is
+         visible, since OTP is not a separate sequential step here. -->
+    <div class="kba-hint" id="kbaOtpNote" style="color:#fdba74;margin:0 0 8px 0;">
+      <i class="ti ti-device-mobile-message"></i> An OTP has also been sent to your registered mobile — both the OTP and this security question must be verified.
+    </div>
+    <div class="kba-question" id="kbaQuestionText">Loading question…</div>
+    <input type="text" id="kbaAnswer" placeholder="Your answer" autocomplete="off"/>
+    <button type="button" class="kba-submit-btn" id="kbaSubmitBtn" onclick="verifyKbaAnswer()">Submit Answer</button>
+    <div class="kba-hint">Answers are matched case/punctuation-insensitively. A wrong answer issues a different question, not a retry of this one.</div>
+  </div>
+
   <!-- Automated verification call (new escalation rung, login-side).
        Shown when st.call_triggered is true, INDEPENDENT of whether a
        transaction is in progress — a sufficiently suspicious login
@@ -244,6 +311,20 @@ input:focus{border-color:#38bdf8}
   <div class="call-banner" id="callBanner">
     <i class="ti ti-shield-exclamation"></i>
     <strong>Automated verification call initiated</strong> — Bank is calling your registered mobile. Please confirm via keypad PIN entry.
+  </div>
+
+  <!-- Interactive "3rd chance" call verification — appears specifically
+       when 2 KBA answers have failed (call_pending). A different
+       question C (never A or B from this episode) is asked over the
+       simulated call. Pass -> capped + monitored access, NOT frozen.
+       Fail -> permanent freeze / bank review, same as reaching
+       CRITICAL any other way. -->
+  <div class="call-verify-wrap" id="callVerifyWrap">
+    <label><i class="ti ti-phone-call"></i> Automated Call — Final Verification</label>
+    <div class="call-verify-question" id="callQuestionText">Loading question…</div>
+    <input type="text" id="callAnswer" placeholder="Your answer" autocomplete="off"/>
+    <button type="button" class="call-verify-btn" id="callSubmitBtn" onclick="verifyCallAnswer()">Verify</button>
+    <div class="call-verify-hint">Two incorrect security answers — suspicion is high. This is the final check: pass to continue with a capped, monitored session; fail and the account is frozen for manual bank review.</div>
   </div>
 
   <!-- New device transaction limit notice -->
@@ -409,10 +490,9 @@ function _getFingerprint() {
   ].join('-');
 }
 // ── CONFIG ───────────────────────────────────────────────────
-
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss" : "ws";
-
 const BS_URL = `${WS_PROTOCOL}://${window.location.host}/ws/`;
+
 // Local sigmoid mirrors backend exactly (same k, mid values)
 const _BK=0.055, _BMID=85, _TK=0.08, _TMID=50;
 
@@ -453,9 +533,26 @@ function localTier(s){ return s<46?0:s<66?1:s<86?2:3; }
 function syncLoginButton(st){
   const btn = document.getElementById('loginBtn');
   if(!btn) return;
+  // KBA/call widgets set their own precise label further down in the
+  // pipeline (checkKbaGate runs immediately before this function), but
+  // this function used to unconditionally overwrite it with a generic
+  // "Proceed — Verification Required" message on every tick for ANY
+  // tier>=2 — including while the KBA box or the call-verify box was
+  // actively showing, silently clobbering the more specific label a
+  // fraction of a second after it appeared. Check widget visibility
+  // first so the specific requirement (OTP+KBA, or the call) stays
+  // shown for as long as that widget is actually up.
+  const kbaShowing  = document.getElementById('kbaWrap')?.classList.contains('show');
+  const callShowing = document.getElementById('callVerifyWrap')?.classList.contains('show');
   if(st.frozen){
     btn.disabled = true;
     btn.textContent = 'Account Secured — Contact Branch';
+  } else if(callShowing){
+    btn.disabled = false;
+    btn.textContent = 'Answer the Automated Call to Continue';
+  } else if(kbaShowing){
+    btn.disabled = false;
+    btn.textContent = 'Enter OTP + Answer Security Question';
   } else if(st.tier >= 2){
     btn.disabled = false;
     btn.textContent = 'Proceed — Verification Required';
@@ -504,6 +601,7 @@ function setDemoTier(tier){
     fwdDash(st); updateStatus(st);
     checkHardening(st.combined_score, st.progressive_harden);
     checkCallBanner(st.call_triggered);
+    checkKbaGate(st);
     syncLoginButton(st);
   }
 }
@@ -575,6 +673,139 @@ function checkCallBanner(callTriggered){
   else               cb.classList.remove('show');
 }
 
+// ── KBA (SECURITY QUESTIONS) GATE ─────────────────────────────
+// Tier 2 requires KBA (question A, then B if wrong) ALONGSIDE OTP —
+// see kba-wrap markup above. Two wrong answers hand off to the
+// interactive call-verify widget instead (checkCallVerifyGate below).
+// curKbaQuestion/curCallQuestion cache the in-flight question so
+// repeated onScore ticks (the websocket fires often) don't re-fetch a
+// new random question on every tick — only when the episode actually
+// needs a NEW one (none loaded yet, or the previous one was answered).
+let curKbaQuestion  = null;
+let curCallQuestion = null;
+
+async function loadKbaQuestion(){
+  try{
+    const res = await fetch('/kba/question/'+curProfile);
+    const q = await res.json();
+    if(q.error) return; // pool exhausted — fail safe, leave gate showing last state
+    curKbaQuestion = q;
+    document.getElementById('kbaQuestionText').textContent = q.question_text;
+    document.getElementById('kbaAnswer').value = '';
+  }catch(e){ /* backend offline — KBA unavailable in standalone mode */ }
+}
+
+async function loadCallQuestion(){
+  try{
+    const res = await fetch('/kba/question/'+curProfile);
+    const q = await res.json();
+    if(q.error) return;
+    curCallQuestion = q;
+    document.getElementById('callQuestionText').textContent = q.question_text;
+    document.getElementById('callAnswer').value = '';
+  }catch(e){}
+}
+
+async function verifyKbaAnswer(){
+  const input = document.getElementById('kbaAnswer');
+  const val = input.value.trim();
+  if(!val || !curKbaQuestion) return;
+  const btn = document.getElementById('kbaSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Verifying...';
+  try{
+    const res = await fetch('/kba/verify/'+curProfile,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({question_id: curKbaQuestion.question_id, answer: val})
+    });
+    const st = await res.json();
+    window._lastState = st; lastState = st;
+    curKbaQuestion = null;
+
+    if(st.kba_verified){
+      document.getElementById('kbaWrap').classList.remove('show');
+      setStatus('Security question verified','#22c55e');
+    } else if(st.call_pending){
+      document.getElementById('kbaWrap').classList.remove('show');
+      await loadCallQuestion();
+      document.getElementById('callVerifyWrap').classList.add('show');
+      setStatus('Two incorrect answers — automated verification call triggered','#ef4444');
+    } else {
+      await loadKbaQuestion(); // issue question B — never a repeat of A
+      document.getElementById('kbaWrap').classList.add('show');
+      setStatus('Incorrect — a different security question has been issued','#f97316');
+    }
+    updateStatus(st);
+    checkCallBanner(st.call_triggered);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Submit Answer';
+  }
+}
+
+async function verifyCallAnswer(){
+  const input = document.getElementById('callAnswer');
+  const val = input.value.trim();
+  if(!val || !curCallQuestion) return;
+  const btn = document.getElementById('callSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Verifying...';
+  try{
+    const res = await fetch('/kba/verify/'+curProfile,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({question_id: curCallQuestion.question_id, answer: val, via_call: true})
+    });
+    const st = await res.json();
+    window._lastState = st; lastState = st;
+    curCallQuestion = null;
+
+    if(st.probation){
+      document.getElementById('callVerifyWrap').classList.remove('show');
+      document.getElementById('callBanner').classList.remove('show');
+      setStatus('Identity confirmed via call — access restored, capped at ₹'+
+        Math.round(st.tx_limit).toLocaleString('en-IN')+' and monitored','#eab308');
+    } else if(st.frozen){
+      setStatus('Call verification failed — session frozen, bank review required','#ef4444');
+    }
+    updateStatus(st);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Verify';
+  }
+}
+
+// Called from shield.onScore on every tick. Purely reactive to the
+// backend's authoritative flags (kba_verified / call_pending) — it
+// never decides escalation itself, only shows/hides the right widget
+// and lazily fetches a question the first time one is needed.
+function checkKbaGate(st){
+  const kw = document.getElementById('kbaWrap');
+  const cvw = document.getElementById('callVerifyWrap');
+  if(!kw || !cvw || !st) return;
+
+  // Visibility must track the EPISODE, not the instantaneous tier.
+  // Ambient decay (0.97/event) can legitimately drop combined_score
+  // back out of the HIGH RISK band between question A and question B
+  // — that must NOT hide an unresolved KBA challenge mid-episode.
+  // kba_failed_count>0 is the backend's own record that an episode
+  // started; it only resets on a full reset() (manual review).
+  const episodeInProgress = st.kba_failed_count > 0 && !st.kba_verified && !st.call_pending;
+  const freshlyHighRisk   = st.tier_label === 'HIGH RISK' && !st.frozen;
+  const needsKba = (episodeInProgress || freshlyHighRisk) && !st.kba_verified && !st.call_pending;
+
+  if(needsKba){
+    kw.classList.add('show');
+    if(!curKbaQuestion) loadKbaQuestion();
+  } else {
+    kw.classList.remove('show');
+    curKbaQuestion = null;
+  }
+
+  if(st.call_pending){
+    cvw.classList.add('show');
+    if(!curCallQuestion) loadCallQuestion();
+  } else {
+    cvw.classList.remove('show');
+    curCallQuestion = null;
+  }
+}
+
 // ── FAILED LOGIN ATTEMPT BADGE ───────────────────────────────
 // Shows a visible attempt counter below the login button so judges
 // can see the PS-3 Goal 4 hardening in real time — "Login attempts
@@ -639,6 +870,9 @@ function handleDevice(ds){
 // ── PROFILE SWITCH ───────────────────────────────────────────
 function setProfile(p){
   curProfile=p; bRaw=0; tRaw=0; deviceState=null; window._lastState=null;
+  curKbaQuestion=null; curCallQuestion=null;
+  document.getElementById('kbaWrap').classList.remove('show');
+  document.getElementById('callVerifyWrap').classList.remove('show');
   // Keep in sync for runTsCheck()'s profile field and any future
   // behaviorsignal.js page (re)scans that read window.BS_PROFILE.
   window.BS_PROFILE=p;
@@ -670,6 +904,7 @@ function setProfile(p){
     updateStatus(stDisplay);
     checkHardening(stDisplay.combined_score, stDisplay.progressive_harden);
     checkCallBanner(stDisplay.call_triggered);
+    checkKbaGate(stDisplay);
     syncLoginButton(stDisplay);
     updateFailedLoginBadge(st.failed_login_count||0);
     if(st.device_state) handleDevice(st.device_state);
@@ -777,15 +1012,27 @@ function doLogin(){
     fallbackAction = 'none';
   }
 
-  const isCritical = frozen || tierLabel === 'CRITICAL' || fallbackAction === 'bank_review';
+  const isCritical = frozen || fallbackAction === 'bank_review' ||
+    // Exception: display_tier (and therefore tier_label) can legitimately
+    // read CRITICAL purely from KBA-failure points while a call result
+    // is still pending (verified in scorer.py testing: 2 wrong KBA
+    // answers alone can push combined_score to ~92, past the 86 CRITICAL
+    // line) — WITHOUT frozen being true. Before the KBA feature, reaching
+    // display_tier 3 always implied frozen=true, so tierLabel==='CRITICAL'
+    // was a safe proxy for "hard block". That invariant no longer holds
+    // during call_pending, so tierLabel alone must not trigger the hard
+    // block here — the explicit call outcome (probation vs. frozen)
+    // handles that state instead, further down.
+    (tierLabel === 'CRITICAL' && !(st && st.call_pending));
   // Per scorer.py's fallback_tier mapping: silent_reauth -> Tier 1
   // (ELEVATED), step_up_otp -> Tier 2 (HIGH RISK), bank_review -> Tier 3.
   // silent_reauth therefore belongs with ELEVATED, not HIGH RISK.
-  const isHighRisk = !isCritical && (
+  const isCallPending = !!(st && st.call_pending);
+  const isHighRisk = !isCritical && !isCallPending && (
     tierLabel === 'HIGH RISK' ||
     fallbackAction === 'step_up_otp'
   );
-  const isElevated = !isCritical && !isHighRisk && (
+  const isElevated = !isCritical && !isHighRisk && !isCallPending && (
     tierLabel === 'ELEVATED' ||
     fallbackAction === 'silent_reauth'
   );
@@ -808,6 +1055,31 @@ function doLogin(){
       return; // HARD GATE
     }
     if(shield) shield.trigger({type:'security_phrase',len:val.length});
+  }
+
+  // TIER 2 KBA GATE: security question required alongside OTP.
+  // Runs only for isHighRisk (Tier 2) — Tier 1 (isElevated) only needs
+  // the phrase above, matching the design: KBA is specifically the
+  // "attacker has my credentials but not my personal answers" layer,
+  // reserved for the higher-risk tier alongside OTP.
+  if(isHighRisk && st && !st.kba_verified){
+    document.getElementById('kbaWrap').classList.add('show');
+    if(!curKbaQuestion) loadKbaQuestion();
+    btn.innerHTML='Answer the security question above';
+    btn.style.cssText='width:100%;padding:13px;border-radius:8px;font-size:14px;font-weight:600;background:#9a3412;color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px';
+    setTimeout(resetBtn,2500);
+    return; // HARD GATE — question A/B must be answered correctly first
+  }
+
+  // CALL-PENDING GATE: two wrong KBA answers — the automated call's
+  // question C decides probation vs. freeze, not this button.
+  if(isCallPending){
+    document.getElementById('callVerifyWrap').classList.add('show');
+    if(!curCallQuestion) loadCallQuestion();
+    btn.innerHTML='Complete phone verification below to continue';
+    btn.style.cssText='width:100%;padding:13px;border-radius:8px;font-size:14px;font-weight:600;background:#7f1d1d;color:#fca5a5;border:1px solid #ef4444;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:20px';
+    setTimeout(resetBtn,2500);
+    return; // HARD GATE — the call widget, not this button, resolves this state
   }
 
   // CRITICAL: Hard block / frozen — only when the backend says so
@@ -895,6 +1167,11 @@ function resetSession(){
   document.getElementById('devBadge').className='device-badge';
   document.getElementById('txWarn').classList.remove('show');
   document.getElementById('phrase').value='';
+  document.getElementById('kbaWrap').classList.remove('show');
+  document.getElementById('callVerifyWrap').classList.remove('show');
+  document.getElementById('kbaAnswer').value='';
+  document.getElementById('callAnswer').value='';
+  curKbaQuestion=null; curCallQuestion=null;
   checkHardening(0,false);
   checkCallBanner(false);
   setDemoTier(0); // clear any active tier lock
@@ -1047,4 +1324,3 @@ async function runTsCheck(){
 </script>
 </body>
 </html>
-

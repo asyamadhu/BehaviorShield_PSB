@@ -42,8 +42,17 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 with contextlib.redirect_stderr(io.StringIO()):
-    from scorer import SuspicionScorer, DeviceTrustEngine, _combine, DWELL
+    from scorer import (SuspicionScorer, DeviceTrustEngine, _combine, DWELL,
+                         hash_kba_answer, _check_kba_answer)
     from profiles import PROFILES
+
+# Real demo answers for profiles.SECURITY_QUESTIONS_SBI_4821 — used only to
+# simulate a legitimate user answering correctly. Never derived from the
+# stored hashes (that would defeat the point of hashing them).
+_KBA_REAL_ANSWERS = {
+    "sq1": "Bunty", "sq2": "St Xaviers", "sq3": "Rocky",
+    "sq4": "Imphal", "sq5": "Rajma Chawal", "sq6": "Hero Splendor",
+}
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -1373,6 +1382,505 @@ def test_normal_session_never_increments_failed_login_count():
     assert s.failed_login_count == 0, (
         f"Normal session must not increment failed_login_count, "
         f"got {s.failed_login_count}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# KBA (SECURITY QUESTIONS) + AUTOMATED CALL + PROBATION
+# ═══════════════════════════════════════════════════════════════
+
+def _push_to_tier2(s):
+    """Helper: push a fresh scorer into Tier 2 via ordinary behavioural
+    signals, independent of any KBA event."""
+    s.process_event({"type": "paste_password"})
+    s.process_event({"type": "mouse_jitter"})
+    s.process_event({"type": "mouse_jitter"})
+    return s.state()
+
+
+def test_kba_hash_roundtrip_and_normalization():
+    """Stored answers are normalised (case/punctuation/whitespace-
+    insensitive) but never stored in plaintext, and a wrong answer must
+    not verify."""
+    h = hash_kba_answer("Rocky")
+    assert _check_kba_answer("rocky", h)
+    assert _check_kba_answer("  RoCkY!  ", h)
+    assert not _check_kba_answer("Bunty", h)
+    assert ":" in h and "rocky" not in h.lower()  # not stored as plaintext
+
+
+def test_kba_correct_first_answer_no_call_no_probation():
+    """Legit user answers question A correctly on the first try —
+    no automated call, no probation, session proceeds normally."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q = s.next_kba_question()
+    st = s.verify_kba_answer(q["question_id"], _KBA_REAL_ANSWERS[q["question_id"]])
+    assert st["kba_verified"] is True
+    assert st["call_pending"] is False
+    assert st["probation"] is False
+    assert st["frozen"] is False
+
+
+def test_kba_never_repeats_a_question_within_one_episode():
+    """Question B must differ from question A, and the call's question C
+    must differ from both — an attacker who fails once shouldn't get a
+    free retry on the identical secret."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question()
+    s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question()
+    assert q2["question_id"] != q1["question_id"]
+    s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    assert q3["question_id"] not in (q1["question_id"], q2["question_id"])
+
+
+def test_two_kba_failures_trigger_call_without_premature_freeze():
+    """Two wrong KBA answers must set call_pending (route to the
+    automated call) WITHOUT auto-freezing the session first — even
+    though combined_score alone can legitimately exceed 86 at this
+    point (verified separately to reach ~92). The call, not the score,
+    must be the authority on freeze vs. probation from here."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question()
+    s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question()
+    st = s.verify_kba_answer(q2["question_id"], "wrong")
+    assert st["kba_failed_count"] == 2
+    assert st["call_pending"] is True
+    assert st["frozen"] is False, (
+        "session must not auto-freeze while a call result is pending")
+
+
+def test_call_verification_pass_grants_capped_probation_not_freeze():
+    """Passing the automated call's question C must NOT freeze the
+    session, must cap tx_limit below the account's normal average, and
+    the cap must actually be enforced on an over-limit transfer."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question(); s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question(); s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    st = s.verify_kba_answer(q3["question_id"], _KBA_REAL_ANSWERS[q3["question_id"]], via_call=True)
+
+    assert st["probation"] is True
+    assert st["frozen"] is False
+    assert st["tx_limit"] is not None
+    assert st["tx_limit"] < PROFILES["arjun"]["avg_transfer_amount"]
+
+    over_limit = st["tx_limit"] + 5000
+    st2 = s.process_event({"type": "transaction_attempt", "amount": over_limit,
+                            "beneficiary": "SBI-XXXX1234", "hour": 12})
+    assert st2["t_raw"] > 0, "an over-cap transfer during probation must be flagged"
+
+
+def test_call_verification_fail_permanently_freezes():
+    """Failing the automated call's question C must freeze the session
+    (bank_review), same permanence guarantee as reaching Tier 3 through
+    ordinary escalation — no probation, no silent recovery."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question(); s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question(); s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    st = s.verify_kba_answer(q3["question_id"], "still wrong", via_call=True)
+
+    assert st["frozen"] is True
+    assert st["probation"] is False
+
+    # Freeze must be sticky — further clean events do not un-freeze it.
+    for _ in range(5):
+        st = s.process_event({"type": "keystroke", "dwell_ms": 95})
+    assert st["frozen"] is True
+
+
+def test_probation_does_not_oscillate_over_idle_events():
+    """Once probation is granted, repeated idle/clean events must not
+    flip the session back to frozen/CRITICAL — probation is sticky
+    (decoupled from the decaying raw score), matching the same
+    stability guarantee Tier 3 freeze already has."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question(); s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question(); s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    s.verify_kba_answer(q3["question_id"], _KBA_REAL_ANSWERS[q3["question_id"]], via_call=True)
+
+    for _ in range(10):
+        st = s.process_event({"type": "keystroke", "dwell_ms": 95, "flight_ms": 140})
+        assert st["frozen"] is False
+        assert st["probation"] is True
+
+
+def test_device_check_cannot_loosen_probation_cap():
+    """A device_check event firing after probation is granted must not
+    override the probation tx_limit with a looser device-based limit —
+    probation is a floor while active."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question(); s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question(); s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    st = s.verify_kba_answer(q3["question_id"], _KBA_REAL_ANSWERS[q3["question_id"]], via_call=True)
+    capped_limit = st["tx_limit"]
+
+    st2 = s.process_event({"type": "device_check",
+                            "device_fingerprint": "Chrome-Win11-1920x1080-Asia/Kolkata"})
+    assert st2["tx_limit"] == capped_limit, (
+        "a trusted-device check must not loosen the probation cap")
+
+
+def test_reset_clears_all_kba_and_probation_state():
+    """reset() (manual review) must fully clear KBA/call/probation
+    state, same guarantee it already provides for other hardening
+    flags."""
+    s = fresh("arjun")
+    _push_to_tier2(s)
+    q1 = s.next_kba_question(); s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question(); s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    s.verify_kba_answer(q3["question_id"], _KBA_REAL_ANSWERS[q3["question_id"]], via_call=True)
+    assert s._probation is True
+
+    s.reset()
+    assert s.kba_failed_count == 0
+    assert s._kba_verified is False
+    assert s._call_pending is False
+    assert s._asked_kba_ids == []
+    assert s._probation is False
+    assert s._probation_tx_limit is None
+    assert s.max_shown_tier == 0
+
+
+def test_all_demo_profiles_have_minimum_question_pool():
+    """Registration requirement: every profile targeting the shared
+    account must carry at least 5 registered questions."""
+    for name in ("arjun", "attacker", "arjun_new_device"):
+        pool = PROFILES[name].get("security_questions", [])
+        assert len(pool) >= 5, f"{name} has only {len(pool)} security questions"
+
+
+def test_incidental_ambient_freeze_cannot_occur_during_active_kba_episode():
+    """Found via browser E2E testing, then strengthened twice: first,
+    continuous ambient telemetry (unrelated to KBA) could independently
+    trip the ordinary freeze between question A and question B. Second,
+    once the score itself was fully frozen during an active episode
+    (see test_score_fully_frozen_mid_kba_episode_even_for_new_signals),
+    ambient signals fired mid-episode no longer move the score AT ALL
+    -- so this test now confirms the badge from the wrong-answer's OWN
+    point addition (KBA_FAIL_PTS) is what reads CRITICAL, and that
+    firing heavy ambient noise afterward changes nothing, rather than
+    those events being what pushes it there.
+
+    Either way, the guarantee holds: freeze cannot occur at all while
+    any KBA episode is unresolved (see the _kba_episode_active
+    property), regardless of how much unrelated ambient signal fires
+    in between. Only the episode's own explicit outcome (a verified
+    answer, or the automated call's pass/fail) may ever freeze or
+    clear it."""
+    s = fresh("attacker")
+    st0 = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                   {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                   {"type": "mouse_jitter"}])
+    assert st0["tier_label"] == "HIGH RISK"
+
+    q1 = s.next_kba_question()
+    st_after_answer = s.verify_kba_answer(q1["question_id"], "wrong")
+    assert st_after_answer["tier_label"] == "CRITICAL", (
+        "the wrong answer's own point addition should already read CRITICAL")
+    assert st_after_answer["frozen"] is False
+
+    # Heavy ambient signals fired while question A's episode is still
+    # unresolved -- must have NO effect at all now (fully frozen score).
+    st = None
+    for _ in range(8):
+        st = s.process_event({"type": "paste_password"})
+    assert st["combined_score"] == st_after_answer["combined_score"], (
+        "score must not move at all during an active KBA episode, "
+        "not even from heavy ambient noise")
+    assert st["frozen"] is False, (
+        "an active KBA episode must fully prevent incidental freezing")
+    assert st["tier_label"] == "CRITICAL", (
+        "the badge should still truthfully reflect the score, only the "
+        "hard freeze action is held off"
+    )
+
+    q2 = s.next_kba_question()
+    st = s.verify_kba_answer(q2["question_id"], "wrong")
+    assert st["frozen"] is False
+    assert st["call_pending"] is True
+
+
+def test_probation_cap_uses_legit_baseline_not_persona_avg():
+    """Found via browser E2E testing: the 'attacker' demo persona
+    carries a deliberately distorted avg_transfer_amount (₹450k, used
+    to trigger unrelated transaction-anomaly checks) — the probation
+    cap must anchor to the real account holder's spending pattern
+    (legit_avg_transfer_amount), not whichever persona triggered the
+    challenge, or an attacker session would get a laughably loose cap
+    (was ₹225,000 before this fix)."""
+    s = fresh("attacker")
+    q1 = s.next_kba_question(); s.verify_kba_answer(q1["question_id"], "wrong")
+    q2 = s.next_kba_question(); s.verify_kba_answer(q2["question_id"], "wrong")
+    q3 = s.next_kba_question()
+    st = s.verify_kba_answer(q3["question_id"], _KBA_REAL_ANSWERS[q3["question_id"]], via_call=True)
+
+    assert st["probation"] is True
+    assert st["tx_limit"] == PROFILES["attacker"]["legit_avg_transfer_amount"] * 0.5, (
+        f"expected cap anchored to legit baseline, got {st['tx_limit']}")
+    assert st["tx_limit"] < 10000, "cap must be tight, not inflated by the persona's own distorted avg"
+
+
+def test_idle_heartbeat_does_not_drift_score_while_gate_unresolved():
+    """The bug: sitting on an unresolved KBA/phrase/call screen with
+    zero real interaction still fires behaviorsignal.js's 3s
+    mouse_idle keep-alive, which was silently decaying b_raw AND
+    (after ~15s of stillness) adding an idle-suspicion penalty —
+    together drifting combined_score up and down while someone was
+    simply reading a question, and could even swap out an unanswered
+    KBA question for a different random one mid-read. Once a
+    hardening gate is reached, the score must hold perfectly steady
+    against pure idle noise until an explicit response is given."""
+    s = fresh("arjun")
+    st = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}])
+    assert st["tier_label"] == "HIGH RISK"
+    locked_score = st["combined_score"]
+
+    for _ in range(10):  # 10 * 3s = 30s of pure idle heartbeats
+        st = s.process_event({"type": "mouse_idle", "micro_movement_px": 0})
+        assert st["combined_score"] == locked_score, (
+            f"score drifted from {locked_score} to {st['combined_score']} "
+            "purely from idle heartbeats while a gate was unresolved")
+        assert st["tier_label"] == "HIGH RISK", (
+            "tier must not flicker out of HIGH RISK from idle noise alone")
+
+
+def test_genuine_new_signals_still_escalate_while_gate_locked():
+    """The fix must be narrow: genuine NEW suspicious activity (not
+    the idle heartbeat) must still move the score normally even while
+    a hardening gate is up -- continuous behavioural telemetry doesn't
+    pause for real activity just because a challenge is pending."""
+    s = fresh("arjun")
+    st = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}])
+    before = st["combined_score"]
+    st = s.process_event({"type": "mouse_jitter"})
+    assert st["combined_score"] > before, (
+        "a genuine new signal must still raise the score while the gate is locked")
+
+
+def test_idle_suppression_resets_correctly_across_kba_questions():
+    """Answering a question (right or wrong) is itself the explicit
+    response that unlocks/re-evaluates the gate -- idle suppression
+    for the NEXT question (and the automated call, once call_pending)
+    must still work identically, not stay permanently unlocked after
+    the first answer.
+
+    Uses realistic organic entry into HIGH RISK (the same signal
+    sequence used elsewhere in this file) rather than a synthetic
+    boundary value -- this is now safe because the freeze-exception
+    was extended to cover the whole active KBA episode (see
+    test_first_wrong_kba_answer_reaches_question_b_even_from_realistic_entry),
+    so a first wrong answer reliably reaches question B instead of
+    freezing outright."""
+    s = fresh("arjun")
+    st = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}])
+    assert st["tier_label"] == "HIGH RISK"
+
+    q1 = s.next_kba_question()
+    with contextlib.redirect_stderr(io.StringIO()):
+        st1 = s.verify_kba_answer(q1["question_id"], "wrong")
+    assert st1["frozen"] is False
+
+    q2 = s.next_kba_question()
+    with contextlib.redirect_stderr(io.StringIO()):
+        st2 = s.verify_kba_answer(q2["question_id"], "wrong")
+    assert st2["call_pending"] is True
+    assert st2["frozen"] is False
+
+    locked_score = st2["combined_score"]
+    for _ in range(5):
+        st = s.process_event({"type": "mouse_idle", "micro_movement_px": 0})
+        assert st["combined_score"] == locked_score, (
+            "idle suppression must still hold while awaiting the automated call, "
+            "not just during question A")
+
+
+def test_reset_clears_gate_lock():
+    s = fresh("arjun")
+    feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+              {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+              {"type": "mouse_jitter"}])
+    assert s._gate_locked is True
+    s.reset()
+    assert s._gate_locked is False
+
+
+def test_first_wrong_kba_answer_reaches_question_b_even_from_realistic_entry():
+    """Previously a documented known issue: with realistic organic
+    escalation into HIGH RISK (paste_password + 4x mouse_jitter),
+    combined_score lands around ~78, and KBA_FAIL_PTS[0]=20 on a
+    first wrong answer reliably crossed the 86 freeze threshold
+    immediately — freezing the account before question B was ever
+    offered, defeating the intended "question A -> question B ->
+    automated call" design entirely.
+
+    Fixed by extending the CRITICAL auto-freeze exception (previously
+    scoped only to _call_pending, i.e. AFTER the 2nd wrong answer) to
+    cover the whole active, unresolved KBA episode from the moment
+    question A is served. The badge still shows CRITICAL truthfully
+    (display_tier is unaffected), but the session no longer force-
+    freezes until the episode's own explicit outcome (call pass/fail,
+    or exhausting chances) decides it."""
+    s = fresh("arjun")
+    st = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}])
+    assert st["tier_label"] == "HIGH RISK"
+
+    q1 = s.next_kba_question()
+    with contextlib.redirect_stderr(io.StringIO()):
+        st1 = s.verify_kba_answer(q1["question_id"], "wrong")
+    assert st1["frozen"] is False, (
+        "first wrong answer must not force-freeze even if the badge reads CRITICAL")
+    assert st1["tier_label"] == "CRITICAL", (
+        "the badge should still truthfully reflect the score crossing 86")
+
+    q2 = s.next_kba_question()
+    assert q2["question_id"] != q1["question_id"]
+    with contextlib.redirect_stderr(io.StringIO()):
+        st2 = s.verify_kba_answer(q2["question_id"], "wrong")
+    assert st2["call_pending"] is True
+    assert st2["frozen"] is False, "must reach the automated call, not freeze outright"
+
+
+def test_non_idle_neutral_events_do_not_erode_score_during_kba_episode():
+    """The gap the mouse_idle-only fix missed: ordinary, non-idle
+    telemetry (e.g. keystrokes typed while reading/answering a KBA
+    question) still hit the trailing decay line on every single call,
+    even though they carry no new suspicious signal themselves.
+    New points from genuinely suspicious events still land via
+    _add_b() before this line runs -- only the automatic *0.97/*0.98
+    erosion was the problem, quietly outpacing additions over several
+    quiet-but-technically-not-idle events and dropping combined_score
+    back under the tier threshold mid-episode, hiding the KBA/OTP box
+    before the user had answered anything."""
+    s = fresh("arjun")
+    st = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}])
+    assert st["tier_label"] == "HIGH RISK"
+    s.next_kba_question()  # starts the episode -- this is the key precondition
+    locked_score = s.state()["combined_score"]
+
+    for _ in range(10):
+        st = s.process_event({"type": "keystroke", "dwell_ms": 95,
+                               "flight_ms": 140, "field": "kba_answer"})
+        assert st["combined_score"] == locked_score, (
+            f"score eroded from {locked_score} to {st['combined_score']} via "
+            "ordinary non-idle telemetry during an active, unanswered KBA episode")
+        assert st["tier_label"] == "HIGH RISK"
+
+
+def test_tier1_deescalation_still_works_without_an_active_kba_episode():
+    """The fix above must be scoped to an ACTIVE KBA/call episode only
+    -- Tier 1's security-phrase gate has a deliberately different,
+    intentional design: sustained clean behaviour SHOULD let decay
+    quietly clear it over time (see
+    test_deescalation_from_tier1_after_sustained_clean_events for the
+    full mechanism test). This test exists specifically to guard
+    against re-broadening the decay-suspension condition to cover all
+    of _gate_locked again, which would silently kill that recovery
+    path."""
+    s = fresh("arjun")
+    st = feed(s, [
+        trusted_device(),
+        {"type": "paste_password"},
+        {"type": "mouse_jitter", "jitter_score": 0.1},
+        {"type": "concurrent_session"},
+        {"type": "remote_access_tool"},
+    ])
+    assert st["shown_tier"] >= 1, "setup should reach Tier 1"
+    assert len(s._asked_kba_ids) == 0, "no KBA episode should be active yet"
+
+    deescalated = False
+    for _ in range(25):
+        st = feed(s, [{"type": "keystroke", "dwell_ms": 95, "flight_ms": 140, "field": "x"}])
+        if st["shown_tier"] == 0:
+            deescalated = True
+            break
+    assert deescalated, "Tier 1 must still de-escalate via decay when no KBA episode is active"
+
+
+def test_score_fully_frozen_mid_kba_episode_even_for_new_signals():
+    """Supersedes an earlier, looser design: originally only decay was
+    suspended during an active KBA episode, reasoning that genuinely
+    NEW suspicious signals should still be free to escalate the score
+    even mid-episode. In practice this meant the number on screen
+    could still visibly CLIMB while someone was simply reading or
+    typing an answer -- not the ambient-noise erosion bug, but the
+    same underlying instability the fix exists to eliminate: the
+    score should hold completely still, in EITHER direction, from the
+    moment a KBA/call question is served until the user's own
+    response resolves it. `device_check` remains exempt (identity,
+    not suspicion-scoring)."""
+    s = fresh("arjun")
+    feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+              {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+              {"type": "mouse_jitter"}])
+    s.next_kba_question()
+    before = s.state()["combined_score"]
+    st = s.process_event({"type": "mouse_jitter"})
+    assert st["combined_score"] == before, (
+        "score must not move at all -- up or down -- during an active, "
+        "unanswered KBA episode")
+
+
+def test_device_check_still_processes_during_active_kba_episode():
+    """device_check is exempt from the full-freeze -- switching
+    devices mid-challenge is a legitimate thing to detect regardless
+    of a pending KBA episode, since it's an identity signal, not a
+    suspicion-scoring one."""
+    s = fresh("arjun")
+    feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+              {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+              {"type": "mouse_jitter"}])
+    s.next_kba_question()
+    st = s.process_event({"type": "device_check", "device_fingerprint": "totally-new-device"})
+    assert "device_state" in st, "device_check must still be processed during an active episode"
+
+
+def test_score_locked_field_exposed_for_frontends():
+    """dashboard.html ran its OWN independent 1s decay/tier-stepdown
+    loop, unaware of an active KBA episode -- it kept locally decaying
+    bRaw/tRaw every second while the backend had correctly frozen the
+    real score, and every real postMessage snapped the display back up,
+    producing a visible sawtooth. Fixed by exposing the backend's own
+    _kba_episode_active as an explicit `score_locked` field, so any
+    frontend with its own timer/animation loop consumes this directly
+    instead of re-deriving (and inevitably drifting from) the same
+    condition. This test guards the field's presence and correctness,
+    not the JS consumer."""
+    s = fresh("arjun")
+    st = feed(s, [{"type": "paste_password"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}, {"type": "mouse_jitter"},
+                  {"type": "mouse_jitter"}])
+    assert st["score_locked"] is False, "no KBA question served yet -- not locked"
+
+    s.next_kba_question()
+    assert s.state()["score_locked"] is True
+
+    import io, contextlib
+    with contextlib.redirect_stderr(io.StringIO()):
+        st_wrong = s.verify_kba_answer(s._asked_kba_ids[-1], "wrong")
+    assert st_wrong["score_locked"] is True, "still locked -- episode continues to question B"
 
 
 if __name__ == "__main__":

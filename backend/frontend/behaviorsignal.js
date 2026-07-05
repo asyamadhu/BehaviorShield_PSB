@@ -35,6 +35,19 @@ class BehaviorShield {
   _connect() {
     this.ws = new WebSocket(this.wsUrl);
 
+    this.ws.onopen = () => {
+      console.log('[BS] Connected');
+      // Send device fingerprint immediately — backend checks trust list
+      this._send({
+        type:               'device_check',
+        device_fingerprint: this._fingerprint(),
+        screen:             `${screen.width}x${screen.height}`,
+        timezone:           Intl.DateTimeFormat().resolvedOptions().timeZone,
+        language:           navigator.language,
+        platform:           navigator.platform,
+      });
+    };
+
     this.ws.onmessage = (e) => {
       try {
         const st = JSON.parse(e.data);
@@ -44,6 +57,15 @@ class BehaviorShield {
 
     this.ws.onerror = () => {};
     this.ws.onclose = () => {
+      // A deliberate disconnect() (e.g. switching demo profiles) must
+      // NOT auto-reconnect — without this guard, the OLD profile's
+      // connection reconnects itself 2s later as a "zombie" and keeps
+      // calling its own onScore callback whenever a message arrives,
+      // silently overwriting the shared global state (window._lastState)
+      // with the WRONG profile's data at an unpredictable moment. This
+      // was the actual cause of switched-profile device-trust status
+      // occasionally showing the previous profile's result.
+      if (this._manualClose) return;
       setTimeout(() => this._connect(), 2000);
     };
   }
@@ -63,8 +85,34 @@ class BehaviorShield {
               : ua.includes('iPhone')         ? 'iOS'
               : ua.includes('Linux')          ? 'Linux' : 'OS';
     const sc  = `${screen.width}x${screen.height}`;
-    const tz  = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const tz  = this._normalizeTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
     return `${br}-${os}-${sc}-${tz}`;
+  }
+
+  // Some OS/ICU builds report a legacy IANA alias instead of the
+  // canonical zone name for the SAME timezone (e.g. older Chromium/
+  // Linux ICU data reports 'Asia/Calcutta' where profiles.py — and
+  // most modern browsers — use 'Asia/Kolkata'). Since device matching
+  // is an exact string comparison, this alone made every profile
+  // (including the legit 'arjun' profile, on its OWN known device)
+  // look like an unrecognised device once real device-checking was
+  // turned on, which is what made the attacker/new-device demo
+  // controllers look "broken" — there was no contrast against legit,
+  // because legit was ALSO failing the match. Normalize known aliases
+  // to their canonical name here so the fingerprint is stable
+  // regardless of which name a given browser/OS reports.
+  _normalizeTimezone(tz) {
+    const LEGACY_TZ_ALIASES = {
+      'Asia/Calcutta':  'Asia/Kolkata',
+      'Asia/Katmandu':  'Asia/Kathmandu',
+      'Asia/Rangoon':   'Asia/Yangon',
+      'Asia/Saigon':    'Asia/Ho_Chi_Minh',
+      'Asia/Dacca':     'Asia/Dhaka',
+      'Europe/Kiev':    'Europe/Kyiv',
+      'US/Pacific':     'America/Los_Angeles',
+      'US/Eastern':     'America/New_York',
+    };
+    return LEGACY_TZ_ALIASES[tz] || tz;
   }
 
   // ── Attach all listeners ───────────────────────────────────
@@ -184,7 +232,13 @@ class BehaviorShield {
       this.ws.send(JSON.stringify({ ts: Date.now(), ...data }));
   }
 
-  disconnect() { this.ws?.close(); }
+  disconnect() {
+    this._manualClose = true;
+    this.onScore = null;   // belt-and-suspenders: even a message already
+                            // in flight when close() is called can't
+                            // touch shared state once this is null.
+    this.ws?.close();
+  }
 }
 
 
@@ -196,7 +250,7 @@ class BehaviorShield {
 // ══════════════════════════════════════════════════════════════
 
 class ThreatShieldScanner {
-  constructor(apiBase =window.location.origin, profile = null) {
+  constructor(apiBase = window.location.origin, profile = null) {
     this.api     = apiBase;
     this.profile = profile;
     this.result  = null;
@@ -327,7 +381,7 @@ class ThreatShieldScanner {
     ].join(';');
     banner.innerHTML = `
       <span>
-        <strong>Bank Security Alert:</strong>
+        🚨 <strong>Bank Security Alert:</strong>
         ${result.bank_response ||
           'This page has been flagged as potentially unsafe. ' +
           'Do not enter any credentials. Verify the URL carefully.'}

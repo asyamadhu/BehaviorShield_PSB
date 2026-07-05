@@ -2,7 +2,7 @@
 
 **AI-Driven Behavioural Authentication for Public Sector Digital Banking**
 
-> 
+> PSB Hackathon Series 2026 · Problem Statement 1 · Team ABELIAN · IIIT Senapati · MNNIT Allahabad
 
 ---
 
@@ -10,7 +10,7 @@
 
 BehaviorShield authenticates users **continuously throughout their session** — not just at login. Every keystroke, mouse movement, and transaction is scored in real time. A legitimate user never sees a prompt. A bot, credential-stuffed attacker, or social-engineering victim is escalated through four progressive security tiers, with funds held and the account secured before any money moves.
 
-
+It also directly satisfies **PS-3 Goal 4 — "harden the login process after unsuccessful login attempts"** — via a standalone failed-login escalation ladder, independent of the behavioural score (see below).
 
 ---
 
@@ -65,6 +65,8 @@ BehaviorShield authenticates users **continuously throughout their session** —
 **Compound evidence drives escalation.** No single signal hard-blocks a session. A new beneficiary alone is a flag. Bot-speed typing alone is a flag. Both together with an unusual hour and a large amount anomaly — that's a freeze. The scoring engine requires corroboration.
 
 **ThreatShield pre-conditions the session.** A user who arrives via a phishing link or pastes a suspicious SMS is already carrying elevated suspicion *before* they type a character. When they then attempt a large transfer, the pre-existing signal tips the combined score into Tier 3 immediately.
+
+**ThreatShield is customer-facing, not just a backend signal.** The login page carries a standing ThreatShield status panel — visible at all times, starting in a calm "CLEAR / No threats detected" state rather than appearing only as a reactive pop-up. A dedicated "Got a suspicious message or link? Check it here" button lets a real customer paste a link or SMS text they received and get an immediate, bank-framed verdict — independent of whether they're mid-login at all. The intent: someone who receives a fraud message "from their bank" shouldn't need a security background to verify it; the check should be one click away on the same page they already trust.
 
 **The RF model refines, not overrides.** The behavioural Random Forest only influences scores in the ambiguous band (combined < 66). Once hard transactional and ThreatShield evidence has pushed the score into HIGH RISK or CRITICAL territory, the RF cannot veto it — it only saw keystroke timing, not the full picture.
 
@@ -134,6 +136,8 @@ No database, no cloud dependency, no API keys. Runs entirely offline.
 | New device | Toggle device trust OFF in demo panel | Probationary mode, ₹10,000 transaction limit, lifts after 5 trusted sessions |
 | Demo hour | Set transaction hour to 02:00 in transfer form | `unusual_hour` signal fires (+15 pts) |
 | Failed login hardening | Trigger the security-phrase gate or a blocked login 3 times in a row | Badge shows escalating count; 3rd attempt -> automated call + freeze, independent of behavioural score |
+| Missing credentials | Click Login Securely with username or password left empty | Blocked immediately, counts as a failed-login attempt (PS-3 Goal 4 ladder) |
+| Customer self-check (ThreatShield) | On the login page (no demo panel needed), click "Got a suspicious message or link? Check it here" and paste a phishing URL/SMS text | ThreatShield status panel updates in place from green CLEAR to red CRITICAL with matched signals and bank-framed advice |
 
 ---
 
@@ -204,6 +208,9 @@ A real PSB transaction dataset (`DataSet__1_.csv`, ~9,082 records, 3,924 anonymi
 
 ---
 
- ABHINAV TRIPATHI · IIIT Senapati
+## Team
 
+**ABELIAN** · IIIT Senapati
 
+PSB Hackathon Series 2026 · Problem Statement 1 · AI-Driven Behavioral Authentication for Digital Banking
+Sponsored by Central Bank of India · Hosted at MNNIT Allahabad
