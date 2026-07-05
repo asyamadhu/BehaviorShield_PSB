@@ -475,19 +475,20 @@ async function toggleDeviceMode() {
     // Backend unavailable — toggle is still visual for demo purposes
   }
 
-  // Re-fire device check so the session immediately reflects the new mode
-  if (window._bs) {
-    window._bs.trigger({ type: 'device_check', device_fingerprint: _getFingerprint() });
+  // Re-fire device check so the session immediately reflects the new mode.
+  // Previously checked `window._bs`, which is never assigned anywhere in
+  // this file (the actual instance is `shield`) -- so this never actually
+  // ran, and the on-screen device badge only updated later, by coincidence,
+  // whenever some unrelated event happened to trigger a fresh device_check
+  // (e.g. a profile switch). That's why toggling could feel like it
+  // "doesn't switch off in one go" / gets stuck on New Device.
+  // Also uses shield._fingerprint() (behaviorsignal.js's method, which has
+  // the IANA timezone-alias normalisation fix) instead of the separate,
+  // unfixed _getFingerprint() duplicate that used to live here -- one
+  // fingerprint implementation now, not two that can drift apart.
+  if (shield) {
+    shield.trigger({ type: 'device_check', device_fingerprint: shield._fingerprint() });
   }
-}
-
-function _getFingerprint() {
-  return [
-    navigator.userAgent.match(/(Chrome|Firefox|Safari|Edge)/)?.[1] || 'Browser',
-    navigator.platform || 'Unknown',
-    `${screen.width}x${screen.height}`,
-    Intl.DateTimeFormat().resolvedOptions().timeZone
-  ].join('-');
 }
 // ── CONFIG ───────────────────────────────────────────────────
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss" : "ws";
@@ -1177,7 +1178,7 @@ function openThreatShield(){
   if(!tsWin) window.open('threatshield.html','_blank');
 }
 
-function resetSession(){
+async function resetSession(){
   bRaw=0; tRaw=0; deviceState=null; backendUp=false; window._lastState=null;
   document.getElementById('devBadge').className='device-badge';
   document.getElementById('txWarn').classList.remove('show');
@@ -1190,8 +1191,20 @@ function resetSession(){
   checkHardening(0,false);
   checkCallBanner(false);
   setDemoTier(0); // clear any active tier lock
-  if(shield) shield.trigger({type:'__reset__'});
-  fetch('/reset/'+curProfile,{method:'POST'}).catch(()=>{});
+
+  // Perform the REAL backend-side reset first (awaited), THEN re-fire a
+  // fresh device_check so the UI immediately reflects the true
+  // post-reset state. Previously this fired '__reset__' over the
+  // websocket -- an event type the backend doesn't actually handle (a
+  // silent no-op) -- before the real reset POST had even resolved, and
+  // nothing ever followed up afterward. The UI was left waiting on
+  // whatever ambient event happened to arrive next, which is why
+  // device state (and KBA/probation/frozen badges) could appear to
+  // "stick" on the pre-reset value for a while after clicking Reset.
+  try {
+    await fetch('/reset/'+curProfile, {method:'POST'});
+  } catch(e) { /* backend offline -- nothing further to sync */ }
+  if(shield) shield.trigger({type:'device_check', device_fingerprint: shield._fingerprint()});
   resetBtn();
   setStatus('Session reset — monitoring resumed','#22c55e');
 }
