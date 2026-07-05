@@ -570,13 +570,28 @@ function syncLoginButton(st){
 const DEMO_TIER_SCORES = {
   1: { combined_score:55, tier:1, tier_label:'ELEVATED',  raw_tier:1, shown_tier:1,
        progressive_harden:true, otp_triggered:false, call_triggered:false, frozen:false,
+       // No score_locked here: Tier 1 (phrase gate only) legitimately
+       // still decays/de-escalates in the real system, so the demo
+       // lock should behave the same way for consistency.
        fallback:{ triggered:false, action:'none', message:'' } },
   2: { combined_score:75, tier:2, tier_label:'HIGH RISK', raw_tier:2, shown_tier:2,
        progressive_harden:true, otp_triggered:true,  call_triggered:false, frozen:false,
+       // score_locked:true — a real Tier 2 (KBA/OTP episode) holds the
+       // score perfectly still until answered (see scorer.py's
+       // _kba_episode_active). Without this, the demo lock fakes
+       // combined_score:75 for the badge/tile but the dashboard's own
+       // decay loop — which checks score_locked, not tier_label — has
+       // no idea it should stop, and keeps dragging its LOCAL copy of
+       // the score down every second between real postMessage ticks,
+       // which then snap it back to 75. Same sawtooth as the real bug
+       // this field exists to prevent, just triggered via the demo
+       // button instead of an actual KBA episode.
+       score_locked:true,
        fallback:{ triggered:true, action:'step_up_otp',
          message:'Bank needs to verify this transaction. OTP step-up initiated. Transaction held for up to 10 minutes.' } },
   3: { combined_score:92, tier:3, tier_label:'CRITICAL',  raw_tier:3, shown_tier:3,
        progressive_harden:true, otp_triggered:true,  call_triggered:true,  frozen:true,
+       score_locked:true,  // frozen sessions must never budge either
        fallback:{ triggered:true, action:'bank_review',
          message:'The bank has flagged this session for mandatory compliance review. Transaction cancelled. Funds have not moved.' } },
 };
@@ -1194,7 +1209,7 @@ window.onload=()=>{
 // THREATSHIELD INLINE — Layer 0 pre-entry protection
 // ══════════════════════════════════════════════════════════
 
-const TS_API = window.location.origin;
+const TS_API = '';
 const RISK_COLORS = {
   CRITICAL:{ bg:'#7f1d1d', badge:'#fca5a5', text:'#fca5a5' },
   HIGH:    { bg:'#7c2d12', badge:'#fdba74', text:'#fdba74' },

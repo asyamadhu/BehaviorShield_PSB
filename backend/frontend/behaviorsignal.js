@@ -409,7 +409,7 @@ if (typeof window !== 'undefined') {
     if (isLocalDev) return;
 
     const scanner = new ThreatShieldScanner(
-      window.BS_API_BASE || window.location.origin,
+      window.BS_API_BASE || 'http://localhost:8000',
       window.BS_PROFILE  || null
     );
     scanner.scan().then(result => {

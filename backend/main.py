@@ -2,10 +2,9 @@
 # main.py — BehaviorShield Backend
 # Run: uvicorn main:app --reload --port 8000
 # =============================================================
-
+from fastapi.staticfiles import StaticFiles
 import json
 import time
-from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from typing import Optional
 
@@ -432,8 +431,6 @@ async def set_device_mode(body: dict):
 async def get_device_mode():
     from scorer import DeviceTrustEngine
     return {"demo_all_trusted": DeviceTrustEngine.DEMO_ALL_TRUSTED}
-
 # Serve the frontend (must be mounted last — after all API routes above —
 # so it does not shadow them; html=True serves index.html for "/").
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
-
