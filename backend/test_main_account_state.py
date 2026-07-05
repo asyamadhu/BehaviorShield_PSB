@@ -21,7 +21,7 @@ with contextlib.redirect_stderr(io.StringIO()):
 
 
 REAL_ANSWERS = {"sq1": "Bunty", "sq2": "St Xaviers", "sq3": "Rocky",
-                "sq4": "Imphal", "sq5": "Rajma Chawal", "sq6": "Hero Splendor"}
+                "sq4": "Lucknow", "sq5": "Rajma Chawal", "sq6": "Hero Splendor"}
 
 
 def _client():
