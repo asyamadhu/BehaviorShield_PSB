@@ -2,8 +2,7 @@
 # main.py — BehaviorShield Backend
 # Run: uvicorn main:app --reload --port 8000
 # =============================================================
-from fastapi.staticfiles import StaticFiles
-import os
+
 import json
 import time
 from datetime import datetime
@@ -48,13 +47,15 @@ sessions: dict[str, SuspicionScorer] = {}
 # ══════════════════════════════════════════════════════════════
 ACCOUNT_STATE: dict[str, dict] = {}
 # profile_name -> {"probation": bool, "tx_limit": float|None, "clean_streak": int,
-#                   "frozen": bool}
+#                   "frozen": bool, "kba_failed_count": int, "asked_kba_ids": list[str],
+#                   "call_pending": bool, "episode_b_raw": float, "episode_t_raw": float}
 
 
 def _get_account_state(profile_name: str) -> dict:
     return ACCOUNT_STATE.setdefault(profile_name, {
         "probation": False, "tx_limit": None, "clean_streak": 0,
-        "frozen": False,
+        "frozen": False, "kba_failed_count": 0, "asked_kba_ids": [],
+        "call_pending": False, "episode_b_raw": 0.0, "episode_t_raw": 0.0,
     })
 
 
@@ -90,6 +91,27 @@ def _seed_scorer_from_account(scorer: SuspicionScorer, profile_name: str):
         scorer._tier_times[3] = time.time()
         scorer.max_shown_tier = 3
 
+    # Restore an in-progress, unresolved KBA/call episode (question
+    # asked, maybe one wrong answer already given, maybe awaiting the
+    # automated call) across a websocket reconnect. Previously ONLY
+    # frozen/probation survived a reconnect — kba_failed_count,
+    # asked_kba_ids, and call_pending did not, so a mid-episode
+    # reconnect silently reset progress back to zero: reaching the
+    # automated call, then a brief websocket drop (far more likely on
+    # a hosted platform's proxy than on a stable localhost connection,
+    # which is why this never surfaced in local testing), then the
+    # NEXT question served came from a fresh scorer with call_pending
+    # already forgotten — looking exactly like "falls back to only
+    # KBA" instead of continuing to the call. Also restores the score
+    # itself (b_raw/t_raw) so the display doesn't contradict "you're
+    # mid-episode" by showing a freshly-reset 0/NORMAL score.
+    if acct["kba_failed_count"] > 0 or acct["call_pending"]:
+        scorer.kba_failed_count = acct["kba_failed_count"]
+        scorer._asked_kba_ids   = list(acct["asked_kba_ids"])
+        scorer._call_pending    = acct["call_pending"]
+        scorer.b_raw            = acct["episode_b_raw"]
+        scorer.t_raw            = acct["episode_t_raw"]
+
 
 def _settle_account_on_disconnect(scorer: SuspicionScorer, profile_name: str):
     """Called when a session ends. Persists a freeze (if this session
@@ -110,18 +132,48 @@ def _settle_account_on_disconnect(scorer: SuspicionScorer, profile_name: str):
         # ordinary probation-clean-streak bookkeeping below — freeze
         # is the more severe outcome and reset() is the only way out
         # of either, so there's nothing more to settle this round.
+        # The episode that led here is over; clear its bookkeeping so
+        # a future reset()+retry doesn't inherit stale progress.
+        acct["kba_failed_count"] = 0
+        acct["asked_kba_ids"]    = []
+        acct["call_pending"]     = False
         return
 
     if scorer._probation and not acct["probation"]:
         # Probation was granted THIS session (call verification just
         # passed) — persist it forward as the account's new baseline.
+        # The episode that led here is also over — same cleanup as
+        # the freeze branch above.
         acct["probation"]    = True
         acct["tx_limit"]     = scorer._probation_tx_limit
         acct["clean_streak"] = 0
+        acct["kba_failed_count"] = 0
+        acct["asked_kba_ids"]    = []
+        acct["call_pending"]     = False
         return
 
+    # Persist an in-progress, UNRESOLVED episode forward (see
+    # _seed_scorer_from_account's docstring for why this matters on a
+    # hosted platform where websocket reconnects are far more common
+    # than on localhost). `_kba_episode_active` already encodes exactly
+    # this condition — reuse it as the single source of truth rather
+    # than re-deriving it here.
+    if scorer._kba_episode_active:
+        acct["kba_failed_count"] = scorer.kba_failed_count
+        acct["asked_kba_ids"]    = list(scorer._asked_kba_ids)
+        acct["call_pending"]     = scorer._call_pending
+        acct["episode_b_raw"]    = scorer.b_raw
+        acct["episode_t_raw"]    = scorer.t_raw
+    elif scorer._kba_verified:
+        # Answered correctly and the episode concluded without ever
+        # reaching frozen/probation (e.g. Tier 2 resolved cleanly) —
+        # nothing further to carry forward.
+        acct["kba_failed_count"] = 0
+        acct["asked_kba_ids"]    = []
+        acct["call_pending"]     = False
+
     if not acct["probation"]:
-        return  # nothing to settle
+        return  # nothing else to settle
 
     if scorer.max_shown_tier <= 1:
         acct["clean_streak"] += 1
@@ -182,7 +234,8 @@ async def reset(profile_name: str):
     if profile_name in ACCOUNT_STATE:
         ACCOUNT_STATE[profile_name] = {
             "probation": False, "tx_limit": None, "clean_streak": 0,
-            "frozen": False,
+            "frozen": False, "kba_failed_count": 0, "asked_kba_ids": [],
+            "call_pending": False, "episode_b_raw": 0.0, "episode_t_raw": 0.0,
         }
     return {"status": "ok"}
 
@@ -432,7 +485,3 @@ async def set_device_mode(body: dict):
 async def get_device_mode():
     from scorer import DeviceTrustEngine
     return {"demo_all_trusted": DeviceTrustEngine.DEMO_ALL_TRUSTED}
-# Serve the frontend (must be mounted last — after all API routes above —
-# so it does not shadow them; html=True serves index.html for "/").
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
