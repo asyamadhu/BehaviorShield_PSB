@@ -250,7 +250,7 @@ class BehaviorShield {
 // ══════════════════════════════════════════════════════════════
 
 class ThreatShieldScanner {
-  constructor(apiBase = 'http://localhost:8000', profile = null) {
+  constructor(apiBase = window.location.origin, profile = null) {
     this.api     = apiBase;
     this.profile = profile;
     this.result  = null;
@@ -409,7 +409,7 @@ if (typeof window !== 'undefined') {
     if (isLocalDev) return;
 
     const scanner = new ThreatShieldScanner(
-      window.BS_API_BASE || 'http://localhost:8000',
+      window.BS_API_BASE || window.location.origin,
       window.BS_PROFILE  || null
     );
     scanner.scan().then(result => {

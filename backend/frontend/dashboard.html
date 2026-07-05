@@ -511,9 +511,11 @@ function fireB(key){
   if(key==='mouse_jitter')             _jitters.push(0.2);
   addB(DEMO_B[key].pts,DEMO_B[key].label,isDev);
   updateAiPanel();
+  sendLive({type:key});
 }
 function fireT(key){
   if(DEMO_T[key]) addT(DEMO_T[key].pts,DEMO_T[key].label,DEMO_T[key].resp);
+  sendLive({type:key});
 }
 function fireTx(amount,bene,hour){
   const known=['SBI-XXXX1234','HDFC-XXXX5678','ICICI-XXXX9012'];
@@ -522,6 +524,7 @@ function fireTx(amount,bene,hour){
   if(isNew)    addT(25,DEMO_T.new_beneficiary.label,DEMO_T.new_beneficiary.resp);
   if(isOff)    addT(15,`Transfer at ${hour}:00 — outside usual 8–22h`,'Silent monitoring — bank will verify if combined with other signals');
   if(isLarge&&isNew) addT(55,DEMO_T.large_new_beneficiary.label,DEMO_T.large_new_beneficiary.resp);
+  sendLive({type:'transaction_attempt',amount,beneficiary:bene,hour});
 }
 
 // ── STAGED ESCALATION ────────────────────────────────────────
@@ -933,10 +936,13 @@ function resetAll(){
   updateUI();
 }
 
-// ── POSTMESSAGE (from index.html and transfer.html) ──────────
-window.addEventListener('message',(e)=>{
-  if(!e.data||typeof e.data.combined_score!=='number')return;
-  const s=e.data;
+// ── LIVE STATE (shared by postMessage popup-mode AND direct WebSocket) ──
+// dashboard.html has two ways of receiving real backend state:
+//   1. As a popup opened by index.html/transfer.html via postMessage (original).
+//   2. Opened directly/standalone (typed URL, bookmark, nav link) — in that
+//      case there is no opener, so this page opens its OWN WebSocket to the
+//      backend. Live by default no matter how the page is reached.
+function applyServerState(s){
   bRaw=s.b_raw||0;
   tRaw=s.t_raw||0;
   combined=s.combined_score||0;
@@ -999,7 +1005,44 @@ window.addEventListener('message',(e)=>{
   checkFallback();
   checkFreeze();
   advanceTier();
+  setLiveStatus(true);
+}
+
+// ── POSTMESSAGE (from index.html / transfer.html, when opened as a popup) ──
+window.addEventListener('message',(e)=>{
+  if(!e.data||typeof e.data.combined_score!=='number')return;
+  applyServerState(e.data);
 });
+
+// ── DIRECT WEBSOCKET (default live source — works whether or not this
+//    page was opened as a popup, e.g. standalone tab / bookmark) ────────
+let liveSocket=null, liveRetryTimer=null;
+function dashProfile(){
+  return new URLSearchParams(location.search).get('profile')||'arjun';
+}
+function setLiveStatus(connected){
+  const badge=document.getElementById('liveBadge');
+  if(!badge||frozen)return;
+  const txt=badge.lastChild;
+  if(txt&&txt.nodeType===3) txt.textContent=connected?' LIVE':' RECONNECTING…';
+}
+function connectLive(){
+  if(liveSocket&&(liveSocket.readyState===0||liveSocket.readyState===1))return;
+  const proto=location.protocol==='https:'?'wss':'ws';
+  liveSocket=new WebSocket(`${proto}://${location.host}/ws/${dashProfile()}`);
+  liveSocket.onmessage=(e)=>{ try{ applyServerState(JSON.parse(e.data)); }catch(_){} };
+  liveSocket.onopen=()=>setLiveStatus(true);
+  liveSocket.onerror=()=>{};
+  liveSocket.onclose=()=>{
+    setLiveStatus(false);
+    if(liveRetryTimer)clearTimeout(liveRetryTimer);
+    liveRetryTimer=setTimeout(connectLive,2000);
+  };
+}
+// Demo buttons forward to live backend so they affect authoritative score too
+function sendLive(event){
+  if(liveSocket&&liveSocket.readyState===1) liveSocket.send(JSON.stringify(event));
+}
 
 // ── CHART INIT ───────────────────────────────────────────────
 function initChart(){
@@ -1023,6 +1066,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   updateDevPanel({status:'trusted',label:"Arjun's Laptop",sessions:47,trust_score_raw:1.0,tx_limit:null,message:''});
   renderAiPanel(false,0,{});
   updateUI();
+  connectLive(); // live by default — see "DIRECT WEBSOCKET" section above
 });
 </script>
 </body>

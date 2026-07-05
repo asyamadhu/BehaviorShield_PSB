@@ -420,7 +420,7 @@ function doTransfer(){
   btn.innerHTML='<i class="ti ti-loader"></i> Evaluating risk...';
 
   // Try backend first, fall back to local scoring
-  fetch('http://localhost:8000/transaction/'+profile,{
+  fetch('/transaction/'+profile,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({amount,beneficiary:bene,hour,profile})
   })

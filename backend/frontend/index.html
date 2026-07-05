@@ -466,7 +466,7 @@ async function toggleDeviceMode() {
 
   // Sync with backend
   try {
-    await fetch('http://localhost:8000/demo/device-mode', {
+    await fetch('/demo/device-mode', {
       method:  'POST',
       headers: {'Content-Type':'application/json'},
       body:    JSON.stringify({ all_trusted: _devAllTrusted })
@@ -490,7 +490,8 @@ function _getFingerprint() {
   ].join('-');
 }
 // ── CONFIG ───────────────────────────────────────────────────
-const BS_URL = 'ws://localhost:8000/ws/';
+const WS_PROTOCOL = window.location.protocol === "https:" ? "wss" : "ws";
+const BS_URL = `${WS_PROTOCOL}://${window.location.host}/ws/`;
 
 // Local sigmoid mirrors backend exactly (same k, mid values)
 const _BK=0.055, _BMID=85, _TK=0.08, _TMID=50;
@@ -685,7 +686,7 @@ let curCallQuestion = null;
 
 async function loadKbaQuestion(){
   try{
-    const res = await fetch('http://localhost:8000/kba/question/'+curProfile);
+    const res = await fetch('/kba/question/'+curProfile);
     const q = await res.json();
     if(q.error) return; // pool exhausted — fail safe, leave gate showing last state
     curKbaQuestion = q;
@@ -696,7 +697,7 @@ async function loadKbaQuestion(){
 
 async function loadCallQuestion(){
   try{
-    const res = await fetch('http://localhost:8000/kba/question/'+curProfile);
+    const res = await fetch('/kba/question/'+curProfile);
     const q = await res.json();
     if(q.error) return;
     curCallQuestion = q;
@@ -712,7 +713,7 @@ async function verifyKbaAnswer(){
   const btn = document.getElementById('kbaSubmitBtn');
   btn.disabled = true; btn.textContent = 'Verifying...';
   try{
-    const res = await fetch('http://localhost:8000/kba/verify/'+curProfile,{
+    const res = await fetch('/kba/verify/'+curProfile,{
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({question_id: curKbaQuestion.question_id, answer: val})
     });
@@ -747,7 +748,7 @@ async function verifyCallAnswer(){
   const btn = document.getElementById('callSubmitBtn');
   btn.disabled = true; btn.textContent = 'Verifying...';
   try{
-    const res = await fetch('http://localhost:8000/kba/verify/'+curProfile,{
+    const res = await fetch('/kba/verify/'+curProfile,{
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({question_id: curCallQuestion.question_id, answer: val, via_call: true})
     });
@@ -1175,7 +1176,7 @@ function resetSession(){
   checkCallBanner(false);
   setDemoTier(0); // clear any active tier lock
   if(shield) shield.trigger({type:'__reset__'});
-  fetch('http://localhost:8000/reset/'+curProfile,{method:'POST'}).catch(()=>{});
+  fetch('/reset/'+curProfile,{method:'POST'}).catch(()=>{});
   resetBtn();
   setStatus('Session reset — monitoring resumed','#22c55e');
 }
@@ -1193,7 +1194,7 @@ window.onload=()=>{
 // THREATSHIELD INLINE — Layer 0 pre-entry protection
 // ══════════════════════════════════════════════════════════
 
-const TS_API = 'http://localhost:8000';
+const TS_API = window.location.origin;
 const RISK_COLORS = {
   CRITICAL:{ bg:'#7f1d1d', badge:'#fca5a5', text:'#fca5a5' },
   HIGH:    { bg:'#7c2d12', badge:'#fdba74', text:'#fdba74' },
