@@ -45,9 +45,14 @@
 # =============================================================
 
 import os
+import re
 import math
 import time
+import random
+import hashlib
+import secrets
 from datetime import datetime
+from typing import Optional
 
 import numpy as np
 
@@ -113,6 +118,27 @@ DWELL = {0: 0, 1: 8, 2: 5, 3: 0}
 DEESCALATION_MARGIN  = 1   # raw_tier must be <= shown_tier - this value
 DEESCALATION_STREAK  = 10  # consecutive qualifying events required
 
+# ── KBA (Knowledge-Based Authentication) TUNING ──────────────────────
+# Layered on top of the existing Tier-2 OTP gate as a second, independent
+# factor. Deliberately SCORE-INDEPENDENT escalation (mirrors failed_login
+# above) — verified against the live sigmoid that 2 wrong answers alone
+# stay within the Tier-2 band (~79, well under the 86 Tier-3 line), so
+# the automated-call trigger and the freeze-on-call-failure are explicit
+# flags, not something we lean on point values to force via the curve.
+KBA_FAIL_PTS       = (20, 35)   # attempt 1, attempt 2+ (b_raw points)
+KBA_CALL_FAIL_PTS  = 60         # automated call verification failed -> freeze
+MIN_KBA_QUESTIONS  = 5          # registration requirement (enforced by caller)
+
+# Probation (post-call-pass) transaction cap, as a fraction of the
+# account's normal average transfer — capped further by the existing
+# new-device limit if that happens to be lower.
+PROBATION_CAP_FRACTION = 0.5
+
+# Consecutive CLEAN sessions (never exceeded Tier 1) required before
+# probation lifts. Lives in main.py's ACCOUNT_STATE (cross-session),
+# not here — this constant documents the contract for that logic.
+CLEAN_SESSIONS_TO_CLEAR = 3
+
 # ── PROGRESSIVE TRANSACTION RESPONSE (score-independent) ───────
 # A flagged transaction's response depends on ATTEMPT COUNT for that
 # specific beneficiary, not on combined_score. Score-based thresholds
@@ -128,6 +154,43 @@ KYC_IMMEDIATE_AMOUNT_RATIO = 25.0
 
 
 # ── MATH HELPERS ─────────────────────────────────────────────
+
+def _normalize_kba_answer(raw: str) -> str:
+    """Normalise a security-question answer before hashing/comparison:
+    lowercase, strip punctuation, collapse whitespace. So 'Mumbai',
+    ' mumbai ', 'MUMBAI!' all match the same stored hash. Trade-off:
+    this tolerates formatting differences but NOT typos — a hashed
+    answer can't be fuzzy-matched, since hashing destroys distance
+    information. Acceptable for a hackathon POC; production would add
+    tolerance by storing a few accepted normalized variants at
+    registration rather than fuzzy-matching against a single hash.
+    """
+    s = (raw or "").strip().lower()
+    s = re.sub(r"[^\w\s]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def hash_kba_answer(raw: str, salt: str = None) -> str:
+    """Hash a security-question answer for storage in a profile.
+    Returns 'salt:hexhash'. Call once at registration time; never store
+    the plaintext answer. (Used to generate profiles.py's demo hashes —
+    regenerate with this function if the demo answers ever change.)
+    """
+    if salt is None:
+        salt = secrets.token_hex(8)
+    digest = hashlib.sha256((salt + _normalize_kba_answer(raw)).encode("utf-8")).hexdigest()
+    return f"{salt}:{digest}"
+
+
+def _check_kba_answer(raw: str, stored: str) -> bool:
+    """Verify a submitted answer against a stored 'salt:hexhash' string."""
+    if not stored or ":" not in stored:
+        return False
+    salt, digest = stored.split(":", 1)
+    candidate = hashlib.sha256((salt + _normalize_kba_answer(raw)).encode("utf-8")).hexdigest()
+    return secrets.compare_digest(candidate, digest)
+
 
 def _sigmoid(x: float, k: float, mid: float) -> float:
     """Compress raw [0..∞] → [0..100], anchored so sigmoid(0) = 0."""
@@ -507,6 +570,46 @@ class SuspicionScorer:
         self._frozen        = False
         self._force_harden  = False   # set by device engine
 
+        # Freezes b_raw (no decay, no new points) the entire time an
+        # unresolved hardening gate is being shown to the user — the
+        # security phrase, a KBA question, or the automated call.
+        # Without this, the frontend's 3s mouse_idle heartbeat (see
+        # behaviorsignal.js _idleMonitor) keeps calling process_event
+        # purely as a keep-alive, and its unconditional decay line was
+        # silently moving combined_score up and down by 10-20+ points
+        # while someone simply sat there reading a question — observed
+        # live drifting 68.6 -> 65.0 -> 57.5 -> 60.7 -> 57.0 over ~20s
+        # of zero interaction. That could flip tier_label out of HIGH
+        # RISK mid-read (hiding an unanswered KBA box), then an
+        # idle-streak penalty could flip it back with a DIFFERENT
+        # random question, and it silently discarded in-progress
+        # phrase-field typing the same way. Set True the moment any
+        # hardening tier is first reached (see state()); cleared only
+        # by an explicit user response for whichever gate is active
+        # (security_phrase submit, failed_login retry, or a KBA/call
+        # verify) — see process_event()'s early-return guard and
+        # verify_kba_answer()'s unlock at the end.
+        self._gate_locked = False
+
+        # ── KBA (security question) state ───────────────────────
+        self.kba_failed_count = 0     # wrong answers this episode (question A/B only)
+        self._kba_verified    = False # a Tier-2 question (A or B) was answered correctly
+        self._call_pending    = False # 2 KBA fails -> awaiting the automated call's 3rd question
+        self._asked_kba_ids   = []    # question ids already used this episode — never repeat one
+
+        # ── Probation (post-call-pass) state ────────────────────
+        # Sticky: NOT cleared by _on_tier_down / score decay. Only
+        # cleared by main.py's cross-session ACCOUNT_STATE tracker once
+        # CLEAN_SESSIONS_TO_CLEAR consecutive calm sessions have passed,
+        # or by reset() (manual review).
+        self._probation         = False
+        self._probation_tx_limit = None
+
+        # Highest _shown_tier reached this session — main.py reads this
+        # at disconnect to decide whether the session counted as "clean"
+        # for probation-clearing purposes.
+        self.max_shown_tier = 0
+
     # ── COMPUTED PROPERTIES ───────────────────────────────────
 
     @property
@@ -606,6 +709,7 @@ class SuspicionScorer:
         return self._shown_tier
 
     def _on_tier(self, tier):
+        self.max_shown_tier = max(self.max_shown_tier, tier)
         if tier == 1: self._harden = True
         if tier == 2:
             self._otp = True
@@ -648,8 +752,47 @@ class SuspicionScorer:
 
     # ── EVENT PROCESSOR ───────────────────────────────────────
 
+    @property
+    def _kba_episode_active(self) -> bool:
+        """True from the moment a KBA question has been served
+        (next_kba_question) until it resolves — a correct answer
+        (_kba_verified), or the automated call's explicit pass/fail
+        (_probation or _frozen gets set by verify_kba_answer). Single
+        source of truth for every place that needs to know "is there
+        an unanswered challenge on screen right now" — used to hold
+        both scoring (process_event) and the CRITICAL auto-freeze
+        (state()) still until the episode's own explicit outcome
+        decides what happens next."""
+        return (
+            len(self._asked_kba_ids) > 0
+            and not self._kba_verified
+            and not self._frozen
+            and not self._probation
+        )
+
     def process_event(self, event: dict) -> dict:
         t = event.get("type", "")
+
+        # While a KBA/call episode is unresolved, hold the score
+        # PERFECTLY still against ambient telemetry — neither eroding
+        # (decay) nor accruing (new points) — until the user's actual
+        # response (verify_kba_answer, a separate code path from this
+        # one) resolves it. Earlier iterations of this fix let genuinely
+        # "new" signals keep escalating the score during an open
+        # episode, reasoning that continuous behavioural telemetry
+        # shouldn't pause for a pending challenge — but that meant the
+        # number on screen could still visibly climb while someone was
+        # simply reading/typing an answer, which is exactly the
+        # instability this whole fix exists to eliminate. `device_check`
+        # is exempt (identity, not suspicion-scoring) since switching
+        # devices mid-challenge is a legitimate thing to detect
+        # regardless. This cannot be exploited to dodge scoring
+        # indefinitely: the frontend blocks login until the active
+        # question is answered, and the episode always terminates in an
+        # explicit verified/frozen/probation outcome.
+        if self._kba_episode_active and t != "device_check":
+            return self.state()
+
 
         # Device fingerprint check
         if t == "device_check":
@@ -665,7 +808,12 @@ class SuspicionScorer:
                 if 0 not in self._tier_times:
                     self._tier_times[0] = time.time()
             if ds["tx_limit"] is not None:
-                self._tx_limit = ds["tx_limit"]
+                # Probation cap is a floor while active — a device_check
+                # result must not loosen it back up.
+                if self._probation and self._probation_tx_limit is not None:
+                    self._tx_limit = min(ds["tx_limit"], self._probation_tx_limit)
+                else:
+                    self._tx_limit = ds["tx_limit"]
 
         # Named behavioural signals
         elif t in BEHAVIOURAL_SIGNALS:
@@ -713,14 +861,26 @@ class SuspicionScorer:
             # Only flag after 5 CONSECUTIVE zero-movement intervals (~15s
             # of complete stillness), then only every 10 more intervals
             # (~30s) so it doesn't spam-accumulate on a still user.
-            if mv < 2:
-                self._idle_streak = getattr(self, '_idle_streak', 0) + 1
-                if self._idle_streak == 5:
-                    self._add_b(8, "No mouse movement for ~15s — possible automated session")
-                elif self._idle_streak > 5 and (self._idle_streak - 5) % 10 == 0:
-                    self._add_b(8, "Sustained no mouse movement — possible automated session")
-            else:
-                self._idle_streak = 0  # any real movement resets streak
+            #
+            # Suppressed entirely while _gate_locked: this heartbeat
+            # fires every 3s purely to keep the connection alive, even
+            # while someone is reading an unresolved security phrase /
+            # KBA question / call prompt. Without this guard, sitting
+            # still to READ the challenge was itself penalized as
+            # "possible automated session" after ~15s — the opposite of
+            # what should happen while someone is deliberately being
+            # careful about a security answer. Ordinary idle detection
+            # (this same mv<2 tracking) still runs normally at all
+            # other times.
+            if not self._gate_locked:
+                if mv < 2:
+                    self._idle_streak = getattr(self, '_idle_streak', 0) + 1
+                    if self._idle_streak == 5:
+                        self._add_b(8, "No mouse movement for ~15s — possible automated session")
+                    elif self._idle_streak > 5 and (self._idle_streak - 5) % 10 == 0:
+                        self._add_b(8, "Sustained no mouse movement — possible automated session")
+                else:
+                    self._idle_streak = 0  # any real movement resets streak
 
         # Mouse jitter — feed RF and flag robotic movement
         elif t == "mouse_jitter":
@@ -815,15 +975,40 @@ class SuspicionScorer:
             #   attempt 3+: +60 pts -> automated call / freeze
             self.failed_login_count += 1
             n = self.failed_login_count
-            pts = 25 if n == 1 else 40 if n == 2 else 60
+            # Retuned (was 25/40/60): the old values only ever pushed
+            # combined_score to ~2 / ~22 / ~86 — attempt 2 never actually
+            # crossed into the HIGH RISK band (66-86) on combined_score,
+            # only the internal _otp flag flipped. Since the KBA gate on
+            # the frontend keys off tier_label === 'HIGH RISK' (not the
+            # _otp flag), attempt 2 never visibly showed a KBA challenge —
+            # the UI jumped straight from NORMAL to CRITICAL on attempt 3.
+            # These values are chosen (empirically, via _combine) so that:
+            #   attempt 1 (+50) -> combined ~13,  stays NORMAL/ELEVATED
+            #   attempt 2 (+60) -> combined ~75,  lands in HIGH RISK ->
+            #                      tier_label flips, KBA gate now shows
+            #   attempt 3 (+80) -> combined >=100, CRITICAL -> freeze
+            pts = 50 if n == 1 else 60 if n == 2 else 80
             self._add_b(pts, f"Failed/blocked login attempt {n} — session hardened per PS-3 Goal 4")
             self._harden = True
             if n >= 2: self._otp = True
             if n >= 3: self._call = True
 
-        # Natural decay — legit users drift to 0, attackers keep adding
-        self.b_raw = max(0.0, self.b_raw * 0.97)
-        self.t_raw = max(0.0, self.t_raw * 0.98)
+        # Natural decay — legit users drift to 0, attackers keep adding.
+        # By this point, the early-return at the top of this function
+        # already handled the KBA-episode case for every event type
+        # except device_check (which is exempt from the freeze —
+        # identity, not suspicion-scoring — but should still hold the
+        # score steady like everything else during an episode). The
+        # remaining case this line covers is Tier 1's phrase gate
+        # (`_gate_locked` but NO active KBA episode yet): the idle
+        # heartbeat must never move the score there either, but genuine
+        # typing must still decay normally — that's the intentional
+        # de-escalation path (test_deescalation_from_tier1_after_
+        # sustained_clean_events), and collapsing it into a blanket
+        # "any gate locked" suspension was tried and broke it.
+        if not ((self._gate_locked and t == "mouse_idle") or self._kba_episode_active):
+            self.b_raw = max(0.0, self.b_raw * 0.97)
+            self.t_raw = max(0.0, self.t_raw * 0.98)
 
         # Update RF
         self._update_rf()
@@ -1003,6 +1188,108 @@ class SuspicionScorer:
         self.signal_log.insert(0, e);   self.signal_log   = self.signal_log[:20]
         self.t_signal_log.insert(0, e); self.t_signal_log = self.t_signal_log[:10]
 
+    # ── KBA (SECURITY QUESTIONS) + AUTOMATED CALL ──────────────
+    #
+    #   Tier 2 entry -> question A (wrong: +20 b_raw, n=1)
+    #                -> question B, different from A (wrong: +35 b_raw,
+    #                   n=2, _call=True, _call_pending=True)
+    #   Automated call (mocked, no telephony API) -> question C,
+    #   different from A and B:
+    #       pass -> _probation=True, _tx_limit capped
+    #       fail -> _frozen=True, permanent (bank_review)
+    #
+    # Correct answers add ZERO points — deliberately. The only downward
+    # force on b_raw anywhere in this system is passive decay (0.97/
+    # event); a signal that could push the score both up AND down based
+    # on live user input is exactly the kind of thing that caused the
+    # earlier oscillation bugs. KBA follows the same one-directional
+    # rule as everything else.
+
+    def next_kba_question(self) -> Optional[dict]:
+        """Return a security question not yet asked this hardening
+        episode, or None if the pool is exhausted (should not happen
+        with MIN_KBA_QUESTIONS=5 and at most 3 asked per episode — a
+        caller seeing None should fail safe to bank_review rather than
+        repeat a question)."""
+        pool = self.profile.get("security_questions", [])
+        unused = [q for q in pool if q["id"] not in self._asked_kba_ids]
+        if not unused:
+            return None
+        q = random.choice(unused)
+        self._asked_kba_ids.append(q["id"])
+        return {"question_id": q["id"], "question_text": q["text"]}
+
+    def verify_kba_answer(self, question_id: str, answer: str, via_call: bool = False) -> dict:
+        """Verify an answer to a previously-issued question. Set
+        via_call=True only for the automated call's question C."""
+        pool    = {q["id"]: q for q in self.profile.get("security_questions", [])}
+        q       = pool.get(question_id)
+        correct = bool(q) and _check_kba_answer(answer, q.get("answer_hash", ""))
+
+        if via_call:
+            self._call_pending = False
+            if correct:
+                self._probation = True
+                cap = self.profile.get("new_device_tx_limit")
+                # legit_avg_transfer_amount anchors to the real account
+                # holder's spending pattern — NOT self.profile's own
+                # avg_transfer_amount, which is deliberately distorted
+                # on some demo personas (e.g. "attacker": ₹450k) to
+                # trigger unrelated transaction-anomaly checks. Falls
+                # back to avg_transfer_amount only if a profile doesn't
+                # define the dedicated field.
+                avg = self.profile.get("legit_avg_transfer_amount",
+                                        self.profile.get("avg_transfer_amount", 8000))
+                fraction_cap = avg * PROBATION_CAP_FRACTION if avg > 0 else None
+                candidates = [c for c in (cap, fraction_cap) if c is not None]
+                self._probation_tx_limit = min(candidates) if candidates else None
+                self._tx_limit = self._probation_tx_limit
+                self._add_b(0, "Automated call verification passed — access restored, transfer amount capped and monitored", layer="kba")
+            else:
+                self._add_b(KBA_CALL_FAIL_PTS,
+                            "Automated call verification failed — identity not confirmed", layer="kba")
+                self._frozen        = True
+                self._otp           = True
+                self._call          = True
+                self._harden        = True
+                self._shown_tier    = 3
+                self._tier_times[3] = time.time()
+                self.max_shown_tier = max(self.max_shown_tier, 3)
+            self._gate_locked = False  # call outcome IS the response; re-evaluate fresh
+            return self.state()
+
+        # Ordinary Tier-2 challenge (question A or B)
+        if correct:
+            self._kba_verified = True
+            self._add_b(0, "Security question answered correctly", layer="kba")
+        else:
+            self.kba_failed_count += 1
+            n   = self.kba_failed_count
+            pts = KBA_FAIL_PTS[0] if n == 1 else KBA_FAIL_PTS[1]
+            self._add_b(pts, f"Security question answered incorrectly (attempt {n})", layer="kba")
+            self._harden = True
+            self._otp    = True
+            if n >= 2:
+                self._call         = True
+                self._call_pending = True
+                # An incidental freeze from ORDINARY ambient scoring
+                # (unrelated to KBA) can land in the window between
+                # question A and question B — continuous behavioural
+                # telemetry doesn't pause just because a KBA episode is
+                # in progress. The call_pending guard in state() stops
+                # any NEW freeze while pending, but can't retroactively
+                # undo one that already landed. From the moment the
+                # call is triggered, it becomes the sole authority on
+                # freeze vs. probation for this episode — so any prior
+                # incidental freeze is explicitly superseded here. This
+                # is a one-time, one-directional transition (not a
+                # recurring un-freeze), so it doesn't reopen the
+                # oscillation risk the dwell/streak system already
+                # closed elsewhere.
+                self._frozen = False
+        self._gate_locked = False  # this answer IS the response; re-evaluate fresh
+        return self.state()
+
     # ── FULL STATE ────────────────────────────────────────────
 
     def state(self) -> dict:
@@ -1067,6 +1354,23 @@ class SuspicionScorer:
         # alone, to stay correct even if that invariant ever changes.
         display_tier = max(shown, fallback_tier, raw)
 
+        # ── Probation cap ────────────────────────────────────────────
+        # A passed call verification deliberately does NOT reduce b_raw
+        # (see verify_kba_answer's "never subtract on success" rule —
+        # same principle as OTP success never reducing score elsewhere
+        # in this file). That means raw combined_score can legitimately
+        # sit at/above 86 even AFTER the user has proven their identity
+        # via the call. Left alone, display_tier would still read 3 and
+        # the freeze block below would re-trigger bank_review on the
+        # very next event — contradicting the explicit "capped +
+        # monitored, not frozen" outcome verify_kba_answer just granted.
+        # Cap the BADGE at HIGH RISK (2) while probation is active; the
+        # underlying score/signal log still shows the true numbers for
+        # audit purposes, only the displayed tier and freeze gate are
+        # capped.
+        if self._probation and display_tier > 2:
+            display_tier = 2
+
         # If the displayed tier is CRITICAL, the SESSION must actually
         # freeze immediately — not just the badge. A CRITICAL badge with
         # the session still "open" would be a state/badge inconsistency.
@@ -1077,7 +1381,52 @@ class SuspicionScorer:
         # alone: with the current threshold tables this is equivalent
         # (raw==3 implies fallback_tier==3, see above), but this form
         # remains correct if that ever changes.
-        if display_tier == 3 and not self._frozen:
+        #
+        # EXCEPTION — self._call_pending, and more generally any active,
+        # unresolved KBA episode: a wrong answer alone can legitimately
+        # push combined_score past 86, which would otherwise auto-freeze
+        # the session here BEFORE the user has had their intended chances
+        # — defeating the "question A -> question B -> automated call"
+        # design.
+        #
+        # Originally this exception only covered _call_pending (i.e.
+        # AFTER the 2nd wrong answer). That left a real gap: with
+        # realistic organic entry into HIGH RISK (combined ~78, verified
+        # via live testing) plus KBA_FAIL_PTS[0]=20 on the FIRST wrong
+        # answer, combined_score reliably crossed 86 immediately —
+        # freezing the account before question B was ever offered, i.e.
+        # before the episode's own 2nd-chance mechanism could kick in
+        # at all. `len(self._asked_kba_ids) > 0 and not self._kba_verified`
+        # is true from the moment question A is served until either a
+        # correct answer (_kba_verified=True) or the automated call
+        # resolves (_frozen or _probation gets set explicitly by
+        # verify_kba_answer) — covering the whole episode, not just its
+        # tail. While a call result is pending, or any KBA question is
+        # outstanding, the explicit outcome from verify_kba_answer() is
+        # the sole authority on freezing, not an incidental score
+        # crossing. The badge still shows CRITICAL (display_tier is
+        # unaffected) — only the hard freeze-the-session action is held
+        # off pending that explicit outcome. This cannot be exploited to
+        # avoid freezing indefinitely: the frontend gate blocks login
+        # until the active question is answered, and every path through
+        # the episode terminates in an explicit frozen/probation/
+        # verified outcome.
+        # Mirrors the tier-3 block below: display_tier already reflects
+        # raw_tier immediately via max(shown, fallback_tier, raw) — it
+        # has no dwell. So the badge/KBA gate can read HIGH RISK (and
+        # the frontend's merged KBA+OTP box, with its "an OTP has also
+        # been sent" note, shows immediately) well before shown_tier's
+        # dwell-gated walk reaches 2 and _on_tier(2) would otherwise be
+        # the only thing setting _otp=True. Without this, otp_triggered
+        # could read False at the exact moment the UI is already
+        # telling the user an OTP was sent — force it true in lockstep
+        # with what's actually on screen, same as the tier-3 case
+        # already does for call_triggered/progressive_harden.
+        if display_tier >= 2 and not self._frozen:
+            self._otp    = True
+            self._harden = True
+
+        if display_tier == 3 and not self._frozen and not self._call_pending and not self._kba_episode_active:
             self._frozen = True
             self._otp    = True
             self._call   = True
@@ -1085,6 +1434,16 @@ class SuspicionScorer:
             self._shown_tier = 3
             self._tier_times[3] = time.time()
             shown = 3
+
+        # Lock the score the instant any hardening gate is reached, so
+        # it holds steady while that gate is unresolved (see
+        # process_event's guard and the _gate_locked field docstring
+        # for why). Deliberately does NOT auto-clear just because
+        # display_tier later reads back below 1 while locked — that
+        # would reopen exactly the flicker this exists to prevent.
+        # Only an explicit response (handled elsewhere) clears it.
+        if display_tier >= 1 and not self._frozen and not self._probation:
+            self._gate_locked = True
 
         td = TIERS[display_tier]
 
@@ -1113,6 +1472,24 @@ class SuspicionScorer:
             "frozen":             self._frozen,
             "time_to_next_tier":  self._time_to_next(),
             "deescalation_streak": self._deescalation_streak,
+
+            "kba_verified":       self._kba_verified,
+            "kba_failed_count":   self.kba_failed_count,
+            "call_pending":       self._call_pending,   # awaiting the automated call's question C
+            "probation":          self._probation,       # sticky — see main.py ACCOUNT_STATE
+            "probation_tx_limit": self._probation_tx_limit,
+            # Authoritative "hold the score still" signal, for any
+            # frontend surface that runs its own local timer/animation
+            # loop rather than purely reacting to each message (e.g.
+            # dashboard.html's chart-sampling interval). Exists so those
+            # surfaces consume this flag directly instead of trying to
+            # re-derive "is a gate currently locked" from tier/otp/call
+            # fields themselves — a second, hand-rolled implementation
+            # of this condition is exactly what silently drifted out of
+            # sync with scorer.py's real rules and caused a visible
+            # sawtooth (local decay fighting the backend's correctly
+            # frozen value every time a real update arrived).
+            "score_locked":       self._kba_episode_active,
 
             "ai_enabled":    _rf_enabled,
             "ai_active":     self._ai_active,
@@ -1213,3 +1590,12 @@ class SuspicionScorer:
         # "New Transfer" button click, which must NOT clear this (a UI
         # action clearing fraud-attempt history would let an attacker
         # erase their own retry record simply by clicking a button).
+
+        self.kba_failed_count = 0
+        self._kba_verified    = False
+        self._call_pending    = False
+        self._asked_kba_ids   = []
+        self._probation          = False
+        self._probation_tx_limit = None
+        self.max_shown_tier      = 0
+        self._gate_locked        = False

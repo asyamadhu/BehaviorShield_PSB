@@ -458,6 +458,17 @@ let bRaw=0,tRaw=0,combined=0;
 let threatRaw=0;
 let prof='legit';
 let frozen=false;
+// Mirrors the backend's authoritative "hold the score still" signal
+// (scorer.py's _kba_episode_active, sent as state.score_locked) —
+// updated on every postMessage. The local decay/step-down loop below
+// checks this instead of re-deriving its own notion of "is a gate
+// active" from tier/otp fields, which is what caused it to drift out
+// of sync with the backend and produce a visible sawtooth: this
+// interval kept decaying bRaw/tRaw locally once a second regardless,
+// while the backend had correctly frozen the real value during an
+// open KBA/OTP episode — every real postMessage snapped the display
+// back up, this timer immediately started dragging it back down again.
+let scoreLocked=false;
 let history=new Array(60).fill(0);
 let chart;
 
@@ -500,11 +511,9 @@ function fireB(key){
   if(key==='mouse_jitter')             _jitters.push(0.2);
   addB(DEMO_B[key].pts,DEMO_B[key].label,isDev);
   updateAiPanel();
-  sendLive({type:key});
 }
 function fireT(key){
   if(DEMO_T[key]) addT(DEMO_T[key].pts,DEMO_T[key].label,DEMO_T[key].resp);
-  sendLive({type:key});
 }
 function fireTx(amount,bene,hour){
   const known=['SBI-XXXX1234','HDFC-XXXX5678','ICICI-XXXX9012'];
@@ -513,7 +522,6 @@ function fireTx(amount,bene,hour){
   if(isNew)    addT(25,DEMO_T.new_beneficiary.label,DEMO_T.new_beneficiary.resp);
   if(isOff)    addT(15,`Transfer at ${hour}:00 — outside usual 8–22h`,'Silent monitoring — bank will verify if combined with other signals');
   if(isLarge&&isNew) addT(55,DEMO_T.large_new_beneficiary.label,DEMO_T.large_new_beneficiary.resp);
-  sendLive({type:'transaction_attempt',amount,beneficiary:bene,hour});
 }
 
 // ── STAGED ESCALATION ────────────────────────────────────────
@@ -823,22 +831,30 @@ function pushSig(layer,label,pts,resp,isDev){
 // ── NATURAL DECAY ────────────────────────────────────────────
 setInterval(()=>{
   if(frozen)return;
-  bRaw=Math.max(0,bRaw*0.97);
-  tRaw=Math.max(0,tRaw*0.98);
-  combined=_combine(bRaw,tRaw);
-  // No noise injection — causes oscillation near tier boundaries
-  // Step-down with 5-point hysteresis — prevents oscillation
-  if(tier(combined)<shownTier){
-    const floors=[0,46,66,86];
-    const floor=floors[shownTier]||0;
-    if(combined<floor-5){
-      shownTier=Math.max(0,shownTier-1);
-      if(shownTier===0){
-        tierTimes={};hardenActive=false;
-        document.getElementById('dwellPanel').classList.remove('show');
-        if(dwellInterval){clearInterval(dwellInterval);dwellInterval=null;}
-      } else {
-        tierTimes[shownTier]=Date.now();
+  // Backend is holding the real score still (an unresolved KBA/OTP/
+  // call episode) — skip the decay math AND the tier-stepdown below,
+  // but still fall through to updateUI() so the history chart keeps
+  // sampling once a second (a flat, accurate line) instead of only
+  // getting sparse points from whatever real postMessage ticks happen
+  // to arrive during the lock.
+  if(!scoreLocked){
+    bRaw=Math.max(0,bRaw*0.97);
+    tRaw=Math.max(0,tRaw*0.98);
+    combined=_combine(bRaw,tRaw);
+    // No noise injection — causes oscillation near tier boundaries
+    // Step-down with 5-point hysteresis — prevents oscillation
+    if(tier(combined)<shownTier){
+      const floors=[0,46,66,86];
+      const floor=floors[shownTier]||0;
+      if(combined<floor-5){
+        shownTier=Math.max(0,shownTier-1);
+        if(shownTier===0){
+          tierTimes={};hardenActive=false;
+          document.getElementById('dwellPanel').classList.remove('show');
+          if(dwellInterval){clearInterval(dwellInterval);dwellInterval=null;}
+        } else {
+          tierTimes[shownTier]=Date.now();
+        }
       }
     }
   }
@@ -848,7 +864,7 @@ setInterval(()=>{
 // ── PROFILE SWITCH ───────────────────────────────────────────
 function setProf(p){
   // Full reset before switching — prevents signal compounding across profiles
-  bRaw=0;tRaw=0;combined=0;frozen=false;threatRaw=0;
+  bRaw=0;tRaw=0;combined=0;frozen=false;threatRaw=0;scoreLocked=false;
   shownTier=0;tierTimes={};hardenActive=false;
   allSigs=[];bSigs=[];tSigs=[];
   if(dwellInterval){clearInterval(dwellInterval);dwellInterval=null;}
@@ -886,7 +902,7 @@ function setProf(p){
 
 // ── RESET ────────────────────────────────────────────────────
 function resetAll(){
-  bRaw=0;tRaw=0;combined=0;threatRaw=0;
+  bRaw=0;tRaw=0;combined=0;threatRaw=0;scoreLocked=false;
   prof='legit';frozen=false;
   shownTier=0;tierTimes={};hardenActive=false;
   history=new Array(60).fill(0);
@@ -917,19 +933,14 @@ function resetAll(){
   updateUI();
 }
 
-// ── LIVE STATE (shared by postMessage popup-mode AND direct WebSocket) ──
-// dashboard.html has two ways of receiving real backend state:
-//   1. As a popup opened by index.html/transfer.html via window.open() +
-//      postMessage (original design — still works).
-//   2. Opened directly/standalone (typed URL, bookmark, nav link from
-//      threatshield.html) — in that case there is no opener pushing
-//      messages, so this page opens its OWN WebSocket to the backend
-//      and drives the exact same render path. This makes "live" the
-//      default no matter how the page was reached.
-function applyServerState(s){
+// ── POSTMESSAGE (from index.html and transfer.html) ──────────
+window.addEventListener('message',(e)=>{
+  if(!e.data||typeof e.data.combined_score!=='number')return;
+  const s=e.data;
   bRaw=s.b_raw||0;
   tRaw=s.t_raw||0;
   combined=s.combined_score||0;
+  scoreLocked=!!s.score_locked;
   // bRaw decays over time on the backend; threatRaw must never exceed
   // it (a stale, larger threatRaw would make the breakdown show a
   // ThreatShield share bigger than the actual behavioural total).
@@ -988,50 +999,7 @@ function applyServerState(s){
   checkFallback();
   checkFreeze();
   advanceTier();
-
-  setLiveStatus(true);
-}
-
-// ── POSTMESSAGE (from index.html / transfer.html, when opened as a popup) ──
-window.addEventListener('message',(e)=>{
-  if(!e.data||typeof e.data.combined_score!=='number')return;
-  applyServerState(e.data);
 });
-
-// ── DIRECT WEBSOCKET (default live source — works whether or not this
-//    page was opened as a popup, e.g. standalone tab / bookmark / the
-//    "Dashboard" link in threatshield.html) ──────────────────────────
-let liveSocket=null, liveRetryTimer=null;
-function dashProfile(){
-  return new URLSearchParams(location.search).get('profile')||'arjun';
-}
-function setLiveStatus(connected){
-  const badge=document.getElementById('liveBadge');
-  if(!badge||frozen)return; // checkFreeze() owns the badge color while frozen
-  badge.lastChild ? badge.lastChild.textContent=connected?' LIVE':' RECONNECTING…' : null;
-}
-function connectLive(){
-  if(liveSocket&&(liveSocket.readyState===0||liveSocket.readyState===1))return;
-  const proto=location.protocol==='https:'?'wss':'ws';
-  liveSocket=new WebSocket(`${proto}://${location.host}/ws/${dashProfile()}`);
-  liveSocket.onmessage=(e)=>{
-    try{ applyServerState(JSON.parse(e.data)); }catch(_){}
-  };
-  liveSocket.onopen=()=>setLiveStatus(true);
-  liveSocket.onerror=()=>{};
-  liveSocket.onclose=()=>{
-    setLiveStatus(false);
-    if(liveRetryTimer)clearTimeout(liveRetryTimer);
-    liveRetryTimer=setTimeout(connectLive,2000);
-  };
-}
-// Demo buttons (fireB/fireT/fireTx) stay fully usable as local overrides
-// (see addB/addT above) — but when a live socket is open, also forward
-// the same signal to the backend so it's reflected in the authoritative
-// combined_score/tier rather than only the local approximation.
-function sendLive(event){
-  if(liveSocket&&liveSocket.readyState===1) liveSocket.send(JSON.stringify(event));
-}
 
 // ── CHART INIT ───────────────────────────────────────────────
 function initChart(){
@@ -1055,7 +1023,6 @@ document.addEventListener('DOMContentLoaded',()=>{
   updateDevPanel({status:'trusted',label:"Arjun's Laptop",sessions:47,trust_score_raw:1.0,tx_limit:null,message:''});
   renderAiPanel(false,0,{});
   updateUI();
-  connectLive();   // live by default — see "DIRECT WEBSOCKET" section above
 });
 </script>
 </body>

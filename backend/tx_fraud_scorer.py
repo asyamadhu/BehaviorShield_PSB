@@ -68,17 +68,9 @@ try:
                    f"Trained on {_bundle.get('n_train', 0):,} samples")
     print(f"[BehaviorShield] TX fraud model loaded — {_auc_note}")
 except Exception as e:
-    import traceback
+    print(f"[BehaviorShield] TX fraud model unavailable ({e}) — rule-based only")
 
-    print("\n" + "=" * 60)
-    print("❌ FAILED TO LOAD TRANSACTION FRAUD MODEL")
-    traceback.print_exc()
-    print(f"\nError: {e}")
-    print("=" * 60 + "\n")
 
-    _loaded = False
-    _model = None
-    _feature_names = []
 def _build_feature_vector(tx_context: dict) -> np.ndarray:
     """
     Map a live transaction context dict into the 109-feature vector
