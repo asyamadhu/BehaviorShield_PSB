@@ -3,6 +3,7 @@
 # Run: uvicorn main:app --reload --port 8000
 # =============================================================
 from fastapi.staticfiles import StaticFiles
+import os
 import json
 import time
 from datetime import datetime
@@ -433,4 +434,5 @@ async def get_device_mode():
     return {"demo_all_trusted": DeviceTrustEngine.DEMO_ALL_TRUSTED}
 # Serve the frontend (must be mounted last — after all API routes above —
 # so it does not shadow them; html=True serves index.html for "/").
-app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
