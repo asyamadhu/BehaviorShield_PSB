@@ -193,6 +193,72 @@ def test_reset_on_never_frozen_account_is_a_no_op():
     assert acct["probation"] is False
 
 
+def test_kba_episode_survives_websocket_reconnect():
+    """The actual bug reported from a live deployment: reach the
+    automated call step (2 wrong KBA answers), then have the websocket
+    drop and reconnect BEFORE the call resolves -- e.g. a brief proxy
+    hiccup, far more common on a hosted platform than on a stable
+    localhost connection, which is why this never surfaced in local
+    testing. Previously only frozen/probation survived a reconnect;
+    kba_failed_count/asked_kba_ids/call_pending did not, so the
+    reconnect silently reset progress to zero -- reaching the call,
+    then appearing to "fall back to only KBA" as if the 2nd wrong
+    answer never happened."""
+    c = _client()
+    _reset(c, "arjun")
+
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        _push_to_high_risk(ws)
+        q1 = c.get("/kba/question/arjun").json()
+        c.post("/kba/verify/arjun", json={"question_id": q1["question_id"], "answer": "wrong"})
+        q2 = c.get("/kba/question/arjun").json()
+        r2 = c.post("/kba/verify/arjun", json={"question_id": q2["question_id"], "answer": "wrong"}).json()
+        assert r2["call_pending"] is True, "setup should reach call_pending before reconnecting"
+
+    # Reconnect (simulates a dropped/reestablished websocket) BEFORE
+    # the call is ever answered.
+    with c.websocket_connect("/ws/arjun") as ws2:
+        st = ws2.receive_json()
+        assert st["call_pending"] is True, (
+            "call_pending must survive a reconnect -- this is the exact bug: "
+            "silently reverting to 'only KBA' after reaching the call")
+        assert st["kba_failed_count"] == 2
+
+    # The call must still be answerable after reconnecting, and still
+    # resolve exactly like an uninterrupted session would.
+    q3 = c.get("/kba/question/arjun").json()
+    r3 = c.post("/kba/verify/arjun", json={"question_id": q3["question_id"], "answer": "wrong", "via_call": True}).json()
+    assert r3["frozen"] is True
+
+    _reset(c, "arjun")
+
+
+def test_kba_episode_progress_cleared_once_resolved():
+    """An episode that concludes (frozen, here) must not leave stale
+    kba_failed_count/asked_kba_ids/call_pending sitting in
+    ACCOUNT_STATE to confuse a future reset()+retry."""
+    c = _client()
+    _reset(c, "arjun")
+
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        _push_to_high_risk(ws)
+        q1 = c.get("/kba/question/arjun").json()
+        c.post("/kba/verify/arjun", json={"question_id": q1["question_id"], "answer": "wrong"})
+        q2 = c.get("/kba/question/arjun").json()
+        c.post("/kba/verify/arjun", json={"question_id": q2["question_id"], "answer": "wrong"})
+        q3 = c.get("/kba/question/arjun").json()
+        c.post("/kba/verify/arjun", json={"question_id": q3["question_id"], "answer": "wrong", "via_call": True})
+
+    acct = c.get("/account/status/arjun").json()
+    assert acct["frozen"] is True
+    assert acct["kba_failed_count"] == 0, "episode bookkeeping must clear once frozen concludes it"
+    assert acct["call_pending"] is False
+
+    _reset(c, "arjun")
+
+
 if __name__ == "__main__":
     tests = []
     for k, v in list(globals().items()):
