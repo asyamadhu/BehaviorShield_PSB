@@ -3,12 +3,14 @@
 # Run: uvicorn main:app --reload --port 8000
 # =============================================================
 
+import os
 import json
 import time
 from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -485,3 +487,6 @@ async def set_device_mode(body: dict):
 async def get_device_mode():
     from scorer import DeviceTrustEngine
     return {"demo_all_trusted": DeviceTrustEngine.DEMO_ALL_TRUSTED}
+
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
