@@ -293,6 +293,8 @@ const profile = params.get('profile')||'arjun';
 let   tSession= 0;
 let   dashWin = null;
 let   devLimit= null;
+let   devLimitReasonTitle = 'Transfer Requires Additional Verification';
+let   devLimitReasonText  = '';   // set alongside devLimit itself, by whichever path (device sim or checkAccountProbation) actually triggers it
 
 // Arjun's baseline (mirrors profiles.py)
 const ARJUN={
@@ -361,6 +363,8 @@ function showDeviceRow(ds){
     :`Device: ${ds.message}`;
   if(ds.tx_limit){
     devLimit=ds.tx_limit;
+    devLimitReasonTitle='Transfer Requires Device Verification';
+    devLimitReasonText=`This device has not established sufficient trust. Maximum transfer on a new device is ₹${ds.tx_limit.toLocaleString('en-IN')}. This limit is lifted after 5 sessions on this device.`;
     document.getElementById('devLimit').classList.add('show');
     document.getElementById('devLimitMsg').textContent=
       `New device — transfers limited to ₹${ds.tx_limit.toLocaleString('en-IN')} until trust is established`;
@@ -406,12 +410,11 @@ function doTransfer(){
   if(!bene){alert('Please select a beneficiary');return}
   if(amount<=0){alert('Please enter a valid amount');return}
 
-  // Device limit check before anything else
+  // Transaction cap check before anything else -- reason-aware message
+  // (devLimitReasonTitle/Text are set alongside devLimit itself,
+  // either by the device-simulation path or checkAccountProbation()).
   if(devLimit!==null && amount>devLimit){
-    showResp('hold',
-      'Transfer Requires Device Verification',
-      `This device has not established sufficient trust. Maximum transfer on a new device is ₹${devLimit.toLocaleString('en-IN')}. This limit is lifted after 5 sessions on this device.`,
-      []);
+    showResp('hold', devLimitReasonTitle, devLimitReasonText, []);
     return;
   }
 
@@ -714,6 +717,47 @@ function resetXfer(){
   updateShield(0);
 }
 
+// ── ACCOUNT-LEVEL PROBATION CHECK (real backend state) ────────
+// Previously the ONLY thing that ever populated devLimit/showed this
+// banner was a hardcoded `if(profile==='arjun_new_device')` simulation
+// below, in window.onload -- meaning cross-session ACCOUNT_STATE
+// probation (granted after a passed automated-call verification, or
+// now also after a flagged phishing-referrer entry) never showed a
+// warning here AT ALL, for any profile, even though the cap was
+// genuinely being enforced server-side the whole time (see
+// doTransfer()'s devLimit check below, which reads the SAME
+// variable). This fetches the real, current account state on load and
+// populates the identical banner/variable, generalized across all
+// three possible causes so each shows its own honest explanation
+// rather than always saying "New device".
+async function checkAccountProbation(){
+  try{
+    const res  = await fetch('/account/status/'+profile);
+    const acct = await res.json();
+    if(!acct.probation || !acct.tx_limit) return;
+    // Device-triggered probation (the pre-existing simulated path,
+    // set directly via showDeviceRow()) takes precedence if it
+    // already set a tighter or equal cap -- don't overwrite a real,
+    // more specific device-trust explanation with a generic one.
+    if(devLimit !== null && devLimit <= acct.tx_limit) return;
+
+    devLimit = acct.tx_limit;
+    const messages = {
+      call_verification_passed: `Extra verification was completed via an automated call — transfers capped at ₹${acct.tx_limit.toLocaleString('en-IN')} while under monitoring.`,
+      phishing_referrer_detected: `This session was flagged for arriving via a link pattern associated with phishing — transfers capped at ₹${acct.tx_limit.toLocaleString('en-IN')}${acct.phishing_referrer_flag_count >= 2 ? ' (repeat occurrence, cap tightened)' : ''} until trust is re-established.`,
+    };
+    const msg = messages[acct.probation_reason] || `Account under monitoring — transfers capped at ₹${acct.tx_limit.toLocaleString('en-IN')}.`;
+    devLimitReasonTitle = acct.probation_reason === 'phishing_referrer_detected'
+      ? 'Transfer Held — Phishing-Pattern Entry Flagged' : 'Transfer Requires Additional Verification';
+    devLimitReasonText = msg;
+    document.getElementById('devLimitMsg').textContent = msg;
+    document.getElementById('devLimit').classList.add('show');
+  }catch(e){
+    // Backend unavailable — no banner, matches how the rest of this
+    // page already degrades (device row simply stays hidden too).
+  }
+}
+
 // ── INIT ─────────────────────────────────────────────────────
 window.onload=()=>{
   updateBar(bSession,0);
@@ -724,6 +768,7 @@ window.onload=()=>{
     showDeviceRow({status:'new',label:'Unknown device',sessions:0,
       tx_limit:10000,message:'New unrecognised device — probationary state'});
   }
+  checkAccountProbation();
   // Forward initial state to dashboard
   setTimeout(()=>{
     if(dashWin&&!dashWin.closed) dashWin.postMessage({

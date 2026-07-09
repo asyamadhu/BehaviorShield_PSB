@@ -384,6 +384,37 @@ def test_reset_clears_phishing_referrer_flag_count():
     assert acct2["phishing_referrer_flag_count"] == 0
 
 
+def test_probation_reason_persists_in_account_status():
+    """Found while wiring transfer.html's real probation check: scorer.py
+    exposed probation_reason on the LIVE websocket state correctly, but
+    main.py never persisted it into ACCOUNT_STATE at all -- so
+    /account/status/{profile} (which any page can query without a live
+    connection, e.g. transfer.html on load) never had it, silently
+    falling back to a generic "account under monitoring" message
+    instead of the honest, specific explanation."""
+    c = _client()
+    _reset(c, "arjun")
+
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check", "simulated": True,
+                       "campaign": "cashback_lure_2026",
+                       "referrer": "http://securebank-kyc-verify.xyz/claim-reward"})
+        ws.receive_json()
+
+    acct = c.get("/account/status/arjun").json()
+    assert acct["probation_reason"] == "phishing_referrer_detected"
+
+    # Also survives a subsequent reconnect (seeded back into a fresh scorer)
+    with c.websocket_connect("/ws/arjun") as ws2:
+        st = ws2.receive_json()
+        assert st["probation_reason"] == "phishing_referrer_detected"
+
+    _reset(c, "arjun")
+    acct2 = c.get("/account/status/arjun").json()
+    assert acct2["probation_reason"] is None
+
+
 if __name__ == "__main__":
     tests = []
     for k, v in list(globals().items()):

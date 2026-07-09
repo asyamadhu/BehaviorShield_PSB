@@ -51,7 +51,7 @@ ACCOUNT_STATE: dict[str, dict] = {}
 # profile_name -> {"probation": bool, "tx_limit": float|None, "clean_streak": int,
 #                   "frozen": bool, "kba_failed_count": int, "asked_kba_ids": list[str],
 #                   "call_pending": bool, "episode_b_raw": float, "episode_t_raw": float,
-#                   "phishing_referrer_flag_count": int}
+#                   "phishing_referrer_flag_count": int, "probation_reason": str|None}
 
 
 def _get_account_state(profile_name: str) -> dict:
@@ -59,7 +59,7 @@ def _get_account_state(profile_name: str) -> dict:
         "probation": False, "tx_limit": None, "clean_streak": 0,
         "frozen": False, "kba_failed_count": 0, "asked_kba_ids": [],
         "call_pending": False, "episode_b_raw": 0.0, "episode_t_raw": 0.0,
-        "phishing_referrer_flag_count": 0,
+        "phishing_referrer_flag_count": 0, "probation_reason": None,
     })
 
 
@@ -86,6 +86,7 @@ def _seed_scorer_from_account(scorer: SuspicionScorer, profile_name: str):
         scorer._probation          = True
         scorer._probation_tx_limit = acct["tx_limit"]
         scorer._tx_limit           = acct["tx_limit"]
+        scorer._probation_reason   = acct["probation_reason"]
     if acct["frozen"]:
         scorer._frozen       = True
         scorer._otp          = True
@@ -155,12 +156,17 @@ def _settle_account_on_disconnect(scorer: SuspicionScorer, profile_name: str):
         return
 
     if scorer._probation and not acct["probation"]:
-        # Probation was granted THIS session (call verification just
-        # passed) — persist it forward as the account's new baseline.
-        # The episode that led here is also over — same cleanup as
-        # the freeze branch above.
-        acct["probation"]    = True
-        acct["tx_limit"]     = scorer._probation_tx_limit
+        # Probation was granted THIS session -- either via a passed
+        # call verification, or immediately via a flagged phishing-
+        # referrer entry (see grant_phishing_referrer_probation) --
+        # persist it forward as the account's new baseline, INCLUDING
+        # which reason applies, so a future reconnect or a fresh
+        # /account/status lookup (e.g. transfer.html's
+        # checkAccountProbation()) can show the honest, specific
+        # explanation rather than a generic fallback.
+        acct["probation"]        = True
+        acct["tx_limit"]         = scorer._probation_tx_limit
+        acct["probation_reason"] = scorer._probation_reason
         acct["clean_streak"] = 0
         acct["kba_failed_count"] = 0
         acct["asked_kba_ids"]    = []
@@ -254,7 +260,7 @@ async def reset(profile_name: str):
             "probation": False, "tx_limit": None, "clean_streak": 0,
             "frozen": False, "kba_failed_count": 0, "asked_kba_ids": [],
             "call_pending": False, "episode_b_raw": 0.0, "episode_t_raw": 0.0,
-            "phishing_referrer_flag_count": 0,
+            "phishing_referrer_flag_count": 0, "probation_reason": None,
         }
     return {"status": "ok"}
 

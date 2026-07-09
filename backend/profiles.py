@@ -41,7 +41,7 @@ SECURITY_QUESTIONS_SBI_4821 = [
      "answer_hash": "demosq3:4d4aca4ed94647a5b8743fe676e0af9bea3144081a464b9ab852c57028ac3a50",
      "system_generated": False},
     {"id": "sq4", "text": "In what city were you born?",
-     "answer_hash": "demosq4:dfadd2c3be264ead55e04edc5adfbdd667510c1976f38510b77975ffcec09179",
+     "answer_hash": "demosq4:86758da1a7029c60e7dfa3fa2273c2a2018e705df15290a38916110c6d67f7af",
      "system_generated": True},
     {"id": "sq5", "text": "What is your favourite childhood dish?",
      "answer_hash": "demosq5:1de242d1a089a7da34bac2572d1d2927cb46a1e88c1a1d3b3920005c86f1b98f",
