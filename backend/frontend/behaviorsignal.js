@@ -46,6 +46,28 @@ class BehaviorShield {
         language:           navigator.language,
         platform:           navigator.platform,
       });
+
+      // Phishing-chain entry-point detection (honest/production path).
+      // Sent unconditionally for EVERY real user, every connection --
+      // not just the demo. Most of the time document.referrer is empty
+      // (typed URL, bookmark, password-manager autofill, most mobile
+      // in-app browsers) or points somewhere unrelated; the backend's
+      // own narrowing (own-brand-token match required, only HIGH/
+      // CRITICAL escalates to probation) is what keeps this from
+      // false-positiving on ordinary external referrers -- see
+      // main.py's _handle_referrer_check for the full reasoning. This
+      // is deliberately NOT gated behind index.html's demo-only
+      // simulated trigger (parseEntryPointFlag/fireEntryPointCheck) --
+      // that's a SEPARATE, additional trigger needed only because this
+      // deployment's bait page and real login share an origin, which
+      // makes a real cross-domain referrer impossible to demonstrate
+      // reliably here. A genuine external phishing page would produce
+      // a real, actionable document.referrer with no demo trigger
+      // needed at all.
+      this._send({
+        type:     'referrer_check',
+        referrer: document.referrer || '',
+      });
     };
 
     this.ws.onmessage = (e) => {

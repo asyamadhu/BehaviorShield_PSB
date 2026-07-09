@@ -21,7 +21,7 @@ with contextlib.redirect_stderr(io.StringIO()):
 
 
 REAL_ANSWERS = {"sq1": "Bunty", "sq2": "St Xaviers", "sq3": "Rocky",
-                "sq4": "Lucknow", "sq5": "Rajma Chawal", "sq6": "Hero Splendor"}
+                "sq4": "Imphal", "sq5": "Rajma Chawal", "sq6": "Hero Splendor"}
 
 
 def _client():
@@ -257,6 +257,131 @@ def test_kba_episode_progress_cleared_once_resolved():
     assert acct["call_pending"] is False
 
     _reset(c, "arjun")
+
+
+def test_referrer_check_ignores_empty_referrer():
+    """Absence of a referrer must NEVER be treated as suspicious --
+    typed URLs, bookmarks, password-manager autofill, and many mobile
+    in-app browsers all legitimately produce no referrer at all."""
+    c = _client()
+    _reset(c, "arjun")
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check", "referrer": ""})
+        st = ws.receive_json()
+        assert st["probation"] is False
+    _reset(c, "arjun")
+
+
+def test_referrer_check_ignores_unrelated_external_referrer():
+    """The narrowing check (own-brand-token match required) is what
+    keeps this from false-positiving on ordinary external referrers --
+    a plain http:// news site or search engine result must NOT trigger
+    probation just because URLAnalyser's generic no-SSL signal alone
+    can otherwise reach CRITICAL."""
+    c = _client()
+    _reset(c, "arjun")
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check", "referrer": "http://some-random-news-site.info/article"})
+        st = ws.receive_json()
+        assert st["probation"] is False
+    _reset(c, "arjun")
+
+
+def test_referrer_check_flags_own_brand_impersonation():
+    """The actual detection: a referrer containing our own bank's
+    brand token in an untrusted-looking domain must grant probation
+    immediately -- no KBA, no call, no waiting for the score to climb."""
+    c = _client()
+    _reset(c, "arjun")
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check",
+                       "referrer": "http://securebank-kyc-verify.xyz/claim-reward"})
+        st = ws.receive_json()
+        assert st["probation"] is True
+        assert st["probation_reason"] == "phishing_referrer_detected"
+        assert st["frozen"] is False
+    _reset(c, "arjun")
+
+
+def test_referrer_check_simulated_requires_known_campaign():
+    """The demo-trigger path (simulated: true) is gated by a server-
+    side campaign allowlist independent of the frontend's own one --
+    calling the websocket directly with an unrecognised campaign name
+    must be ignored, not treated as a signal, so this can't be used as
+    a general-purpose 'inject probation via query string' vector."""
+    c = _client()
+    _reset(c, "arjun")
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check", "simulated": True,
+                       "campaign": "not_a_real_campaign",
+                       "referrer": "http://securebank-fake.xyz/x"})
+        st = ws.receive_json()
+        assert st["probation"] is False, "unrecognised campaign must be ignored even with a matching brand token"
+    _reset(c, "arjun")
+
+
+def test_referrer_check_simulated_known_campaign_works():
+    c = _client()
+    _reset(c, "arjun")
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check", "simulated": True,
+                       "campaign": "cashback_lure_2026",
+                       "referrer": "http://securebank-kyc-verify.xyz/claim-reward"})
+        st = ws.receive_json()
+        assert st["probation"] is True
+    _reset(c, "arjun")
+
+
+def test_phishing_referrer_flag_count_persists_across_reconnect():
+    """A second occurrence must be recognised as a repeat even across
+    a brand-new websocket connection, not just within one continuous
+    session -- mirrors the same reconnect-persistence pattern already
+    proven for kba_failed_count."""
+    c = _client()
+    _reset(c, "arjun")
+
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check",
+                       "referrer": "http://securebank-kyc-verify.xyz/claim"})
+        st1 = ws.receive_json()
+    assert st1["phishing_referrer_flag_count"] == 1
+    cap1 = st1["tx_limit"]
+
+    # Reconnect (simulates a page reload) and flag a SECOND time
+    with c.websocket_connect("/ws/arjun") as ws2:
+        st_initial = ws2.receive_json()
+        assert st_initial["phishing_referrer_flag_count"] == 1, (
+            "count must survive the reconnect even before a second flag happens")
+        ws2.send_json({"type": "referrer_check",
+                        "referrer": "http://securebank-kyc-verify.xyz/claim"})
+        st2 = ws2.receive_json()
+    assert st2["phishing_referrer_flag_count"] == 2
+    assert st2["tx_limit"] == cap1 / 2
+
+    _reset(c, "arjun")
+
+
+def test_reset_clears_phishing_referrer_flag_count():
+    c = _client()
+    _reset(c, "arjun")
+    with c.websocket_connect("/ws/arjun") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "referrer_check",
+                       "referrer": "http://securebank-kyc-verify.xyz/claim"})
+        ws.receive_json()
+
+    acct = c.get("/account/status/arjun").json()
+    assert acct["phishing_referrer_flag_count"] == 1
+
+    _reset(c, "arjun")
+    acct2 = c.get("/account/status/arjun").json()
+    assert acct2["phishing_referrer_flag_count"] == 0
 
 
 if __name__ == "__main__":

@@ -604,6 +604,24 @@ class SuspicionScorer:
         # or by reset() (manual review).
         self._probation         = False
         self._probation_tx_limit = None
+        # WHY probation was granted -- the tx-cap mechanism itself is
+        # identical regardless of cause (same field, same clearing
+        # logic), but the user-facing explanation must be honest about
+        # which thing actually happened. "call_verification_passed" is
+        # the original/default reason; "phishing_referrer_detected" is
+        # granted immediately on connect (see grant_phishing_referrer_
+        # probation below), with no KBA/call ever involved.
+        self._probation_reason  = None
+
+        # Cross-session count of how many times THIS account has been
+        # flagged via a phishing-pattern referrer/entry link. Persisted
+        # in main.py's ACCOUNT_STATE (mirrors kba_failed_count's
+        # pattern) so a second occurrence within a short window is
+        # treated as meaningfully more suspicious than the first --
+        # one phished click is unlucky, two in close succession
+        # suggests an active campaign specifically targeting this
+        # account, not a one-off.
+        self.phishing_referrer_flag_count = 0
 
         # Highest _shown_tier reached this session — main.py reads this
         # at disconnect to decide whether the session counted as "clean"
@@ -1230,6 +1248,7 @@ class SuspicionScorer:
             self._call_pending = False
             if correct:
                 self._probation = True
+                self._probation_reason = "call_verification_passed"
                 cap = self.profile.get("new_device_tx_limit")
                 # legit_avg_transfer_amount anchors to the real account
                 # holder's spending pattern — NOT self.profile's own
@@ -1288,6 +1307,59 @@ class SuspicionScorer:
                 # closed elsewhere.
                 self._frozen = False
         self._gate_locked = False  # this answer IS the response; re-evaluate fresh
+        return self.state()
+
+    def grant_phishing_referrer_probation(self, risk_label: str, matched_pattern: str) -> dict:
+        """Called immediately on connect (see main.py's referrer_check
+        handling) when this session's entry link/referrer matches a
+        known phishing pattern -- NOT tied to any KBA/call flow at
+        all. Reuses the EXACT same probation mechanism already granted
+        after a passed automated-call verification: same tx-cap
+        calculation, same cross-session persistence via main.py's
+        ACCOUNT_STATE, same clean-session-streak clearing. Only
+        `_probation_reason` differs, so the UI can show an honest,
+        specific explanation instead of implying a call/KBA happened
+        when it didn't.
+
+        Deliberately "harden, don't lock" -- the person completing
+        this login is very often the legitimate account holder who
+        was phished, not an attacker. Their credentials may already be
+        compromised from thirty seconds ago on a page this system has
+        zero visibility into, but blocking a legitimate login on a
+        pattern match alone would be actively harmful. Capping
+        transactions and requiring extra verification for transfers is
+        the proportionate response -- contain the potential blast
+        radius without punishing someone for being a phishing target
+        through no fault of their own."""
+        self.phishing_referrer_flag_count += 1
+        repeat = self.phishing_referrer_flag_count >= 2
+
+        self._probation = True
+        self._probation_reason = "phishing_referrer_detected"
+        # Same cap logic as the call-verification-passed path (see
+        # verify_kba_answer above) -- anchored to the account's real
+        # spending baseline, not a persona's deliberately-inflated
+        # avg_transfer_amount. A second occurrence within a short
+        # window (tracked cross-session by main.py) is treated as an
+        # active targeted campaign, not a one-off -- halve the cap
+        # rather than just repeating the same one.
+        cap = self.profile.get("new_device_tx_limit")
+        avg = self.profile.get("legit_avg_transfer_amount",
+                                self.profile.get("avg_transfer_amount", 8000))
+        fraction_cap = avg * PROBATION_CAP_FRACTION if avg > 0 else None
+        candidates = [c for c in (cap, fraction_cap) if c is not None]
+        base_cap = min(candidates) if candidates else None
+        self._probation_tx_limit = (base_cap / 2) if (repeat and base_cap) else base_cap
+        self._tx_limit = self._probation_tx_limit
+
+        label = (f"Entry link matched a known phishing pattern ({risk_label}"
+                 f"{', repeat occurrence' if repeat else ''}) — {matched_pattern}")
+        self._add_b(0, label, layer="threat_shield")
+        # Force at least Tier 1 (security phrase) even if the
+        # behavioural score alone wouldn't otherwise reach it yet --
+        # "harden immediately" per the design brief, not "wait for the
+        # score to catch up".
+        self._harden = True
         return self.state()
 
     # ── FULL STATE ────────────────────────────────────────────
@@ -1477,6 +1549,8 @@ class SuspicionScorer:
             "kba_failed_count":   self.kba_failed_count,
             "call_pending":       self._call_pending,   # awaiting the automated call's question C
             "probation":          self._probation,       # sticky — see main.py ACCOUNT_STATE
+            "probation_reason":   self._probation_reason,  # "call_verification_passed" | "phishing_referrer_detected" | None
+            "phishing_referrer_flag_count": self.phishing_referrer_flag_count,
             "probation_tx_limit": self._probation_tx_limit,
             # Authoritative "hold the score still" signal, for any
             # frontend surface that runs its own local timer/animation
@@ -1597,5 +1671,7 @@ class SuspicionScorer:
         self._asked_kba_ids   = []
         self._probation          = False
         self._probation_tx_limit = None
+        self._probation_reason   = None
+        self.phishing_referrer_flag_count = 0
         self.max_shown_tier      = 0
         self._gate_locked        = False

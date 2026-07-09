@@ -51,7 +51,7 @@ with contextlib.redirect_stderr(io.StringIO()):
 # stored hashes (that would defeat the point of hashing them).
 _KBA_REAL_ANSWERS = {
     "sq1": "Bunty", "sq2": "St Xaviers", "sq3": "Rocky",
-    "sq4": "Lucknow", "sq5": "Rajma Chawal", "sq6": "Hero Splendor",
+    "sq4": "Imphal", "sq5": "Rajma Chawal", "sq6": "Hero Splendor",
 }
 
 
@@ -1881,6 +1881,57 @@ def test_score_locked_field_exposed_for_frontends():
     with contextlib.redirect_stderr(io.StringIO()):
         st_wrong = s.verify_kba_answer(s._asked_kba_ids[-1], "wrong")
     assert st_wrong["score_locked"] is True, "still locked -- episode continues to question B"
+
+
+def test_phishing_referrer_grants_probation_not_freeze():
+    """Core design principle: this is very often the LEGITIMATE
+    account holder who was phished, not an attacker -- blocking them
+    would be actively harmful. The response must be 'harden, don't
+    lock': probation (tx cap + extra verification) granted
+    immediately, never a freeze."""
+    s = fresh("arjun")
+    st = s.grant_phishing_referrer_probation("CRITICAL", "SecureBank brand token in untrusted domain")
+    assert st["probation"] is True
+    assert st["probation_reason"] == "phishing_referrer_detected"
+    assert st["frozen"] is False
+    assert st["progressive_harden"] is True, "phrase gate must show immediately, not wait for score to catch up"
+    assert st["tx_limit"] is not None and st["tx_limit"] > 0
+
+
+def test_phishing_referrer_cap_uses_legit_baseline():
+    """Same cap-calculation discipline as the call-verification-passed
+    path: anchored to the account's real spending baseline, not a
+    persona's deliberately-inflated avg_transfer_amount (e.g.
+    "attacker": ₹450k, used elsewhere to trigger unrelated
+    transaction-anomaly checks)."""
+    s = fresh("attacker")
+    st = s.grant_phishing_referrer_probation("HIGH", "impersonation match")
+    assert st["tx_limit"] < 10000, (
+        "cap must use legit_avg_transfer_amount, not the attacker persona's inflated baseline")
+
+
+def test_phishing_referrer_repeat_occurrence_halves_cap():
+    """A second flag on the same account (persisted cross-session via
+    main.py's ACCOUNT_STATE, see test_main_account_state.py) is
+    treated as a targeted campaign, not a one-off -- tighten the cap
+    rather than repeat the same one."""
+    s = fresh("arjun")
+    st1 = s.grant_phishing_referrer_probation("CRITICAL", "first")
+    cap1 = st1["tx_limit"]
+    st2 = s.grant_phishing_referrer_probation("CRITICAL", "second")
+    assert st2["phishing_referrer_flag_count"] == 2
+    assert st2["tx_limit"] == cap1 / 2
+
+
+def test_phishing_referrer_reset_clears_everything():
+    s = fresh("arjun")
+    s.grant_phishing_referrer_probation("CRITICAL", "x")
+    assert s.phishing_referrer_flag_count == 1
+    s.reset()
+    st = s.state()
+    assert st["probation"] is False
+    assert st["probation_reason"] is None
+    assert st["phishing_referrer_flag_count"] == 0
 
 
 if __name__ == "__main__":

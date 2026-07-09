@@ -50,7 +50,8 @@ sessions: dict[str, SuspicionScorer] = {}
 ACCOUNT_STATE: dict[str, dict] = {}
 # profile_name -> {"probation": bool, "tx_limit": float|None, "clean_streak": int,
 #                   "frozen": bool, "kba_failed_count": int, "asked_kba_ids": list[str],
-#                   "call_pending": bool, "episode_b_raw": float, "episode_t_raw": float}
+#                   "call_pending": bool, "episode_b_raw": float, "episode_t_raw": float,
+#                   "phishing_referrer_flag_count": int}
 
 
 def _get_account_state(profile_name: str) -> dict:
@@ -58,6 +59,7 @@ def _get_account_state(profile_name: str) -> dict:
         "probation": False, "tx_limit": None, "clean_streak": 0,
         "frozen": False, "kba_failed_count": 0, "asked_kba_ids": [],
         "call_pending": False, "episode_b_raw": 0.0, "episode_t_raw": 0.0,
+        "phishing_referrer_flag_count": 0,
     })
 
 
@@ -114,6 +116,12 @@ def _seed_scorer_from_account(scorer: SuspicionScorer, profile_name: str):
         scorer.b_raw            = acct["episode_b_raw"]
         scorer.t_raw            = acct["episode_t_raw"]
 
+    # Carry the cross-session phishing-referrer flag count forward too
+    # (see scorer.py's grant_phishing_referrer_probation) — a second
+    # occurrence needs to be recognised as a repeat even if it happens
+    # in a brand-new connection, not just within one continuous session.
+    scorer.phishing_referrer_flag_count = acct["phishing_referrer_flag_count"]
+
 
 def _settle_account_on_disconnect(scorer: SuspicionScorer, profile_name: str):
     """Called when a session ends. Persists a freeze (if this session
@@ -127,6 +135,11 @@ def _settle_account_on_disconnect(scorer: SuspicionScorer, profile_name: str):
     streak to 0, so an attacker can't wait out probation with idle
     logins."""
     acct = _get_account_state(profile_name)
+
+    # Independent of the frozen/probation branching below (a phishing-
+    # referrer flag doesn't require either to have happened this
+    # session) — always sync the count forward first.
+    acct["phishing_referrer_flag_count"] = scorer.phishing_referrer_flag_count
 
     if scorer._frozen:
         acct["frozen"] = True
@@ -201,7 +214,10 @@ async def ws_endpoint(ws: WebSocket, profile_name: str):
         while True:
             data  = await ws.receive_text()
             event = json.loads(data)
-            st    = scorer.process_event(event)
+            if event.get("type") == "referrer_check":
+                st = _handle_referrer_check(scorer, profile_name, event)
+            else:
+                st = scorer.process_event(event)
             await ws.send_json(st)
     except WebSocketDisconnect:
         print(f"[-] {profile_name}")
@@ -238,6 +254,7 @@ async def reset(profile_name: str):
             "probation": False, "tx_limit": None, "clean_streak": 0,
             "frozen": False, "kba_failed_count": 0, "asked_kba_ids": [],
             "call_pending": False, "episode_b_raw": 0.0, "episode_t_raw": 0.0,
+            "phishing_referrer_flag_count": 0,
         }
     return {"status": "ok"}
 
@@ -358,6 +375,88 @@ def _inject_threat_pts(profile_name: str, pts: int, label: str):
             "pts":    pts,
             "label":  label,
         })
+
+
+# ══════════════════════════════════════════════════════════════
+# PHISHING-CHAIN ENTRY-POINT DETECTION
+#
+# Detects the case where a user's browser carries evidence they
+# arrived at THIS login page via a link/page impersonating our own
+# bank -- not "any suspicious-looking referrer" (which would false-
+# positive constantly: plenty of harmless old sites still don't have
+# SSL, which alone is enough to score CRITICAL in URLAnalyser -- see
+# _OWN_BRAND_TOKENS below for why this is narrowed further than that).
+#
+# Two trigger paths feed the SAME handler:
+#   1. HONEST/PRODUCTION: behaviorsignal.js automatically sends the
+#      browser's real `document.referrer` on every websocket connect,
+#      for every real user, unconditionally. Most of the time this is
+#      empty (typed URL, bookmark, autofill) or points somewhere
+#      unrelated -- both cases are silently ignored below.
+#   2. DEMO-ONLY: phishing_bait.html's redirect can't rely on a real
+#      cross-domain referrer, because for THIS deployment the bait
+#      page and the real login page share the same origin (same
+#      Render app) -- document.referrer would just show our own
+#      domain, not something that looks like an attack. index.html
+#      sends an explicit `simulated: true` + a pre-set fake referrer
+#      URL in that case, gated by a server-side campaign allowlist
+#      (mirroring the client-side one) so this can't be used as a
+#      general "inject arbitrary probation via query string" vector.
+# ══════════════════════════════════════════════════════════════
+
+# Real, well-known Indian public-sector banks already have entries in
+# threat_shield.py's PSB_BRAND_TOKENS -- but OUR demo bank ("SecureBank")
+# is fictional and isn't a real brand, so it was never in that list.
+# This is deliberately SEPARATE from PSB_BRAND_TOKENS, not merged into
+# it -- these are demo-specific self-impersonation tokens, not real
+# public-sector bank names, and mixing them would risk the demo tokens
+# silently affecting real-bank detection accuracy or vice versa.
+_OWN_BRAND_TOKENS = {"securebank", "secure-bank", "secur3bank"}
+
+# Server-side mirror of index.html's _KNOWN_PHISHING_CAMPAIGNS --
+# checked independently here so a demo trigger can't be forged by
+# calling the websocket directly with an arbitrary campaign string,
+# bypassing the frontend's own allowlist.
+_KNOWN_PHISHING_CAMPAIGNS = {"cashback_lure_2026", "kyc_urgent_2026", "refund_lure_2026"}
+
+
+def _handle_referrer_check(scorer: SuspicionScorer, profile_name: str, event: dict) -> dict:
+    referrer  = (event.get("referrer") or "").strip()
+    simulated = bool(event.get("simulated"))
+    campaign  = event.get("campaign") or ""
+
+    if not referrer:
+        return scorer.state()   # absence is never suspicious on its own
+
+    if simulated and campaign not in _KNOWN_PHISHING_CAMPAIGNS:
+        return scorer.state()   # unrecognised demo trigger -> ignore, not a signal
+
+    if not _threat_enabled:
+        return scorer.state()
+
+    # The narrowing check: only act if the referrer specifically looks
+    # like it's impersonating OUR bank. This is what keeps the ALWAYS-
+    # ON, every-real-user automatic check from false-positiving on
+    # ordinary external referrers (news sites, search engines,
+    # corporate SSO) -- those can and do legitimately lack SSL or sit
+    # on an unusual TLD without being remotely related to phishing
+    # this specific bank.
+    if not any(tok in referrer.lower() for tok in _OWN_BRAND_TOKENS):
+        return scorer.state()
+
+    result = URLAnalyser().analyse(referrer, "")
+    # Even with the brand-token narrowing above, only escalate to full
+    # probation for HIGH/CRITICAL -- a MODERATE match (impersonation
+    # token present, but otherwise fairly clean) still gets logged via
+    # the ordinary threat-points pathway so it's visible in the signal
+    # log, without the stronger response of a transaction cap.
+    if result["risk_label"] in ("HIGH", "CRITICAL"):
+        top_signal = result["signals"][0]["signal"] if result.get("signals") else referrer[:60]
+        return scorer.grant_phishing_referrer_probation(result["risk_label"], top_signal)
+
+    _inject_threat_pts(profile_name, result["suspicion_pts_for_session"],
+                        f"Entry link risk [{result['risk_label']}]: {referrer[:60]}")
+    return scorer.state()
 
 
 @app.post("/threat/check-url")

@@ -73,6 +73,26 @@ input:focus{border-color:#38bdf8}
   border-radius:8px;font-size:11px;color:#eab308;font-family:'Courier New',monospace}
 .tx-warn.show{display:block}
 
+/* ── Phishing-chain entry-point flag ──
+   Shown when this session's FIRST websocket connection arrived
+   carrying a tagged entry-point signal (see the phishing_bait.html ->
+   ?entry=phishing_redirect handoff, and the parsing block near
+   setProfile()). Deliberately placed above the fold, right under the
+   logo — this is the single most important thing a phished-but-
+   legitimate user needs to see BEFORE they even reach the login
+   form, not a footnote. Precautionary tone throughout: this fires on
+   a URL/pattern match alone, so the system genuinely doesn't know
+   yet whether this is the real account owner (who got phished) or an
+   attacker with harvested credentials -- the copy must not imply
+   certainty either way. */
+.entry-flag-banner{display:none;padding:10px 12px;margin-bottom:14px;
+  background:rgba(249,115,22,.08);border:1px solid rgba(249,115,22,.35);
+  border-radius:8px;font-size:11.5px;line-height:1.5;color:#fdba74;
+  font-family:'Courier New',monospace}
+.entry-flag-banner.show{display:block}
+.entry-flag-banner strong{color:#f97316}
+.entry-flag-banner .efb-detail{margin-top:5px;color:#94a3b8;font-size:10.5px}
+
 /* ── Automated verification call banner ──
    New escalation rung between OTP/security-phrase and a full freeze.
    Orange (#f97316) matches transfer.html's 'hold' tier styling — one
@@ -188,6 +208,29 @@ input:focus{border-color:#38bdf8}
     <div class="logo-text">Secure<span>Bank</span></div>
   </div>
   <div class="logo-sub">Public Sector Digital Banking — Protected by BehaviorShield</div>
+
+  <!-- ── PHISHING-CHAIN ENTRY-POINT FLAG ──
+       Hidden by default. Shown by parseEntryPointFlag() (see script
+       below) when this page was reached via the phishing_bait.html ->
+       index.html?entry=phishing_redirect handoff -- simulating the
+       realistic case where a phishing kit harvests credentials on a
+       fake page and then redirects the victim onward to the REAL
+       bank, either to avoid suspicion or because the kit proxies
+       through. This does NOT mean the person logging in now is
+       necessarily an attacker -- it's very often the legitimate
+       account owner who got phished and is completing their login
+       normally, unaware anything happened. The copy stays
+       precautionary, never accusatory, for exactly that reason. -->
+  <div class="entry-flag-banner" id="entryFlagBanner">
+    <i class="ti ti-alert-triangle"></i>
+    <strong>This session started from an external link.</strong>
+    We matched it against a known scam pattern. If you received an
+    urgent SMS, email, or WhatsApp message asking you to log in or
+    claim a reward, please always type <strong>securebank.example</strong>
+    directly into your browser next time, rather than following a link.
+    As a precaution, we've added extra verification to this session.
+    <div class="efb-detail" id="entryFlagDetail">Analysing entry link…</div>
+  </div>
 
   <!-- ── THREATSHIELD ENTRY POINT (customer-facing) ──
        Always visible, not buried in the demo controller. Real
@@ -524,6 +567,90 @@ let deviceState=null;
 let backendUp=false;
 let demoLockTier=0;    // 0=live, 1=Tier1 locked, 2=Tier2, 3=Tier3
 let lastState=null;    // last backend state; used by setDemoTier() to re-render on lock change
+
+// ── PHISHING-CHAIN ENTRY-POINT DETECTION ──────────────────────
+// Only a small, explicit allowlist of demo campaign names are
+// honoured -- this is a controlled demonstration of a real detection
+// mechanism, not a general-purpose "inject arbitrary probation via
+// query string" endpoint. An unrecognised campaign name is silently
+// ignored rather than treated as a signal, same posture as ordinary
+// unrecognised referrers in the real world (most links pointing at
+// a bank ARE legitimate; only a known-bad pattern should count).
+// Mirrored server-side in main.py's _KNOWN_PHISHING_CAMPAIGNS, checked
+// independently there too -- this allowlist alone is not the security
+// boundary, it's just what decides whether the DEMO banner shows.
+//
+// Each campaign maps to a pre-set fake referrer URL (not a user-
+// suppliable query param) -- this is what phishing_bait.html "arrived
+// from" in the simulation. A REAL production deployment doesn't need
+// any of this: behaviorsignal.js already sends the browser's actual
+// `document.referrer` automatically on every connect, for every real
+// user, unconditionally (see the 'open' handler below and
+// behaviorsignal.js's _connect()). This whole block exists ONLY
+// because, for THIS deployment, the bait page and the real login page
+// share the same origin (same Render app) -- a real document.referrer
+// would just show our own domain, not something that looks like an
+// attack, so the demo needs an explicit simulated signal to be
+// reliably demonstrable regardless of that hosting quirk.
+const _KNOWN_PHISHING_CAMPAIGNS = {
+  'cashback_lure_2026': 'http://securebank-kyc-verify.xyz/claim-reward',
+  'kyc_urgent_2026':    'http://securebank-account-suspended.tk/verify-now',
+  'refund_lure_2026':   'http://securebank-refund-portal.top/claim',
+};
+let _entrySimulatedReferrer = null;   // pre-set fake URL for the matched demo campaign
+let _entryPhishingFired     = false;  // fire the backend check exactly once per page load
+
+function parseEntryPointFlag(){
+  const params = new URLSearchParams(window.location.search);
+  if(params.get('entry') !== 'phishing_redirect') return;
+  const campaign = params.get('campaign') || '';
+  if(!(campaign in _KNOWN_PHISHING_CAMPAIGNS)) return;   // unrecognised -> ignore, not a signal
+  _entrySimulatedReferrer = _KNOWN_PHISHING_CAMPAIGNS[campaign];
+  document.getElementById('entryFlagBanner').dataset.campaign = campaign;
+  document.getElementById('entryFlagBanner').classList.add('show');
+}
+
+// Called once, right when the websocket for the CURRENT profile
+// finishes connecting (see the 'open' listener in setProfile()) --
+// not on every reconnect, so a brief network hiccup mid-session
+// doesn't re-fire the same check repeatedly. Sends a `referrer_check`
+// message over the SAME websocket every other event uses -- this is
+// the identical message type/handler that fires automatically and
+// unconditionally for every real user via behaviorsignal.js's real
+// `document.referrer`; the only thing that differs here is the
+// `simulated: true` flag and a pre-set URL, both required and both
+// checked server-side against main.py's own campaign allowlist.
+function fireEntryPointCheck(){
+  if(!_entrySimulatedReferrer || _entryPhishingFired || !shield || !shield.ws) return;
+  _entryPhishingFired = true;
+  const campaign = document.getElementById('entryFlagBanner').dataset.campaign;
+  shield.trigger({
+    type: 'referrer_check', simulated: true,
+    campaign, referrer: _entrySimulatedReferrer,
+  });
+}
+
+// Reads the probation fields straight off the normal state ticks
+// (see shield.onScore below) rather than a separate response object --
+// once the backend grants probation with reason
+// "phishing_referrer_detected", every subsequent state() carries it,
+// same as any other probation grant.
+function updateEntryPointBanner(st){
+  const detail = document.getElementById('entryFlagDetail');
+  if(!detail) return;
+  if(st.probation && st.probation_reason === 'phishing_referrer_detected'){
+    const repeat = st.phishing_referrer_flag_count >= 2;
+    detail.textContent = `Extra verification is active${repeat ? ' (repeat occurrence — cap tightened)' : ''}. `
+      + `Transfers capped at ₹${Math.round(st.tx_limit).toLocaleString('en-IN')} until trust is re-established.`;
+  }
+}
+
+function clearEntryPointFlag(){
+  _entrySimulatedReferrer = null;
+  _entryPhishingFired = false;
+  const banner = document.getElementById('entryFlagBanner');
+  if(banner){ banner.classList.remove('show'); delete banner.dataset.campaign; }
+}
 
 function localScore(){ return _combine(bRaw,tRaw); }
 function localTier(s){ return s<46?0:s<66?1:s<86?2:3; }
@@ -884,11 +1011,22 @@ function handleDevice(ds){
 }
 
 // ── PROFILE SWITCH ───────────────────────────────────────────
+let _hasBootstrapped = false;   // guards against clearing the entry-point flag on the initial automatic setProfile() call (see window.onload)
+
 function setProfile(p){
   curProfile=p; bRaw=0; tRaw=0; deviceState=null; window._lastState=null;
   curKbaQuestion=null; curCallQuestion=null;
   document.getElementById('kbaWrap').classList.remove('show');
   document.getElementById('callVerifyWrap').classList.remove('show');
+  // Only clear the entry-point flag on a genuine manual profile switch
+  // (e.g. clicking a different demo profile button mid-session) -- the
+  // very FIRST setProfile() call is the automatic bootstrap one that
+  // window.onload fires 900ms after parseEntryPointFlag() already ran,
+  // and clearing here unconditionally would wipe the flag before
+  // fireEntryPointCheck() (triggered by THIS SAME call's websocket
+  // 'open' event, further down) ever got a chance to use it.
+  if(_hasBootstrapped) clearEntryPointFlag();
+  _hasBootstrapped = true;
   // Keep in sync for runTsCheck()'s profile field and any future
   // behaviorsignal.js page (re)scans that read window.BS_PROFILE.
   window.BS_PROFILE=p;
@@ -924,11 +1062,13 @@ function setProfile(p){
     syncLoginButton(stDisplay);
     updateFailedLoginBadge(st.failed_login_count||0);
     if(st.device_state) handleDevice(st.device_state);
+    updateEntryPointBanner(st);
   };
 
   shield.ws.addEventListener('open',()=>{
     backendUp=true;
     setStatus('Backend connected — '+p,'#22c55e');
+    fireEntryPointCheck();
   });
   shield.ws.addEventListener('error',()=>{
     backendUp=false;
@@ -1205,6 +1345,7 @@ async function resetSession(){
     await fetch('/reset/'+curProfile, {method:'POST'});
   } catch(e) { /* backend offline -- nothing further to sync */ }
   if(shield) shield.trigger({type:'device_check', device_fingerprint: shield._fingerprint()});
+  clearEntryPointFlag();
   resetBtn();
   setStatus('Session reset — monitoring resumed','#22c55e');
 }
@@ -1213,6 +1354,7 @@ async function resetSession(){
 window.onload=()=>{
   renderCog();
   openDash();
+  parseEntryPointFlag();   // must run before setProfile()'s websocket connects, below
   setTimeout(()=>setProfile('arjun'),900);
   // Auto-scan this page on load (Layer 0 — passive, zero friction)
   setTimeout(runTsPageScan, 1200);
