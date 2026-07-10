@@ -6,3 +6,4 @@ numpy
 joblib
 pandas
 # No additional dependencies needed for ThreatShield — pure stdlib
+gunicorn
